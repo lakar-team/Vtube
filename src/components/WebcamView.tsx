@@ -1,0 +1,109 @@
+import { useEffect, useRef } from "react";
+import type { MutableRefObject } from "react";
+import type { DebugLandmarks } from "../mocap/types";
+
+/** Upper-body bone connections (MediaPipe pose indices). */
+const POSE_CONNECTIONS: ReadonlyArray<readonly [number, number]> = [
+  [11, 12], // shoulders
+  [11, 13], // L shoulder -> elbow
+  [13, 15], // L elbow -> wrist
+  [12, 14], // R shoulder -> elbow
+  [14, 16], // R elbow -> wrist
+  [11, 23], // torso sides
+  [12, 24],
+  [23, 24], // hips
+];
+
+export interface WebcamViewProps {
+  videoRef: MutableRefObject<HTMLVideoElement | null>;
+  debugLandmarksRef: MutableRefObject<DebugLandmarks>;
+  mirror: boolean;
+  showOverlay: boolean;
+}
+
+/**
+ * Webcam preview with an optional landmark debug overlay.
+ * The overlay canvas is drawn in un-mirrored video space and flipped with the
+ * same CSS transform as the <video>, so points always line up with the image.
+ */
+export function WebcamView({
+  videoRef,
+  debugLandmarksRef,
+  mirror,
+  showOverlay,
+}: WebcamViewProps) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    let rafId = 0;
+
+    function draw() {
+      rafId = requestAnimationFrame(draw);
+      const canvas = canvasRef.current;
+      const video = videoRef.current;
+      if (!canvas || !video) return;
+
+      const w = video.videoWidth || 640;
+      const h = video.videoHeight || 480;
+      if (canvas.width !== w) canvas.width = w;
+      if (canvas.height !== h) canvas.height = h;
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.clearRect(0, 0, w, h);
+      if (!showOverlay) return;
+
+      const { face, pose } = debugLandmarksRef.current;
+
+      if (face) {
+        ctx.fillStyle = "rgba(80, 250, 123, 0.85)";
+        for (let i = 0; i < face.length; i += 2) {
+          const p = face[i];
+          ctx.fillRect(p.x * w - 0.75, p.y * h - 0.75, 1.5, 1.5);
+        }
+      }
+
+      if (pose) {
+        ctx.strokeStyle = "rgba(255, 184, 108, 0.9)";
+        ctx.lineWidth = 2;
+        for (const [a, b] of POSE_CONNECTIONS) {
+          const pa = pose[a];
+          const pb = pose[b];
+          if (!pa || !pb) continue;
+          if ((pa.visibility ?? 1) < 0.5 || (pb.visibility ?? 1) < 0.5) continue;
+          ctx.beginPath();
+          ctx.moveTo(pa.x * w, pa.y * h);
+          ctx.lineTo(pb.x * w, pb.y * h);
+          ctx.stroke();
+        }
+        ctx.fillStyle = "rgba(255, 121, 198, 0.95)";
+        for (let i = 0; i <= 16; i++) {
+          const p = pose[i];
+          if (!p || (p.visibility ?? 1) < 0.5) continue;
+          ctx.beginPath();
+          ctx.arc(p.x * w, p.y * h, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+
+    rafId = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(rafId);
+  }, [showOverlay, debugLandmarksRef, videoRef]);
+
+  const flip = mirror ? { transform: "scaleX(-1)" } : undefined;
+
+  return (
+    <div className="webcam-view">
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        style={flip}
+        className="webcam-video"
+      />
+      <canvas ref={canvasRef} style={flip} className="webcam-overlay" />
+    </div>
+  );
+}

@@ -1,0 +1,78 @@
+import {
+  FaceLandmarker,
+  FilesetResolver,
+  PoseLandmarker,
+} from "@mediapipe/tasks-vision";
+
+/**
+ * MediaPipe Tasks Vision setup — REAL landmark tracking.
+ *
+ * This replaces the old AI Studio prototype's fake "pixel differencing across
+ * tracking quadrants" approach with actual ML models:
+ * - FaceLandmarker: 478 face landmarks + 52 ARKit-style blendshapes
+ *   (eyeBlinkLeft, jawOpen, mouthPucker, ...) per frame.
+ * - PoseLandmarker: 33 body landmarks (normalized + metric world coords),
+ *   of which we use the upper body.
+ *
+ * The WASM runtime and .task model files are fetched from Google's CDN on
+ * first load (~10 MB total, cached by the browser afterwards). If you need
+ * fully-offline operation, download the files and serve them from /public —
+ * see SETUP.md "Offline models".
+ */
+
+const WASM_BASE =
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+
+const FACE_MODEL_URL =
+  "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+
+// "lite" pose model: best latency for an upper-body webcam use case.
+// Swap to pose_landmarker_full for a bit more accuracy at higher cost.
+const POSE_MODEL_URL =
+  "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
+
+export interface Landmarkers {
+  face: FaceLandmarker;
+  pose: PoseLandmarker;
+  close: () => void;
+}
+
+export async function createLandmarkers(): Promise<Landmarkers> {
+  const fileset = await FilesetResolver.forVisionTasks(WASM_BASE);
+
+  const [face, pose] = await Promise.all([
+    FaceLandmarker.createFromOptions(fileset, {
+      baseOptions: {
+        modelAssetPath: FACE_MODEL_URL,
+        delegate: "GPU",
+      },
+      runningMode: "VIDEO",
+      numFaces: 1,
+      // The blendshapes are the key feature: direct, calibrated-ish 0..1
+      // ARKit coefficients for blinks/jaw/mouth — far more reliable than
+      // deriving them geometrically from landmark distances.
+      outputFaceBlendshapes: true,
+      outputFacialTransformationMatrixes: false,
+    }),
+    PoseLandmarker.createFromOptions(fileset, {
+      baseOptions: {
+        modelAssetPath: POSE_MODEL_URL,
+        delegate: "GPU",
+      },
+      runningMode: "VIDEO",
+      numPoses: 1,
+      minPoseDetectionConfidence: 0.5,
+      minPosePresenceConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    }),
+  ]);
+
+  return {
+    face,
+    pose,
+    close: () => {
+      face.close();
+      pose.close();
+    },
+  };
+}

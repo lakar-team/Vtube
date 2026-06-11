@@ -1,0 +1,245 @@
+* {
+  box-sizing: border-box;
+}
+
+:root {
+  color-scheme: dark;
+  --bg: #14141c;
+  --panel: #1d1d29;
+  --border: #2e2e42;
+  --text: #e8e8f0;
+  --muted: #8c8ca6;
+  --accent: #7c5cff;
+  --ok: #50fa7b;
+  --bad: #ff5555;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 12px;
+  gap: 12px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.topbar .sub {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 13px;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.btn {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.calibration-panel {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.calib-status.ok {
+  color: var(--ok);
+}
+
+.calib-status.hint {
+  color: var(--muted);
+  font-size: 12px;
+  max-width: 280px;
+}
+
+.panes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+}
+
+@media (max-width: 900px) {
+  .panes {
+    grid-template-columns: 1fr;
+  }
+}
+
+.pane {
+  position: relative;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  min-height: 240px;
+}
+
+.webcam-view {
+  position: absolute;
+  inset: 0;
+}
+
+.webcam-video,
+.webcam-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.webcam-overlay {
+  pointer-events: none;
+}
+
+.avatar-viewport {
+  position: absolute;
+  inset: 0;
+}
+
+.avatar-viewport canvas {
+  display: block;
+}
+
+.viewport-status,
+.pane-status {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.viewport-status.error,
+.pane-error {
+  color: var(--bad);
+  padding: 16px;
+  text-align: center;
+}
+
+.pane-error {
+  position: absolute;
+  inset: auto 0 0 0;
+}
+
+.viewport-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--muted);
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 6px;
+}
+
+footer {
+  flex: none;
+}
+
+.debug-hud {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 32px;
+  align-items: flex-start;
+}
+
+.hud-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.hud-row span {
+  color: var(--muted);
+}
+
+.hud-table {
+  border-collapse: collapse;
+}
+
+.hud-table th,
+.hud-table td {
+  text-align: left;
+  padding: 1px 14px 1px 0;
+}
+
+.hud-table th {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.ok {
+  color: var(--ok);
+}
+
+.bad {
+  color: var(--bad);
+}
+
+.hud-error {
+  color: var(--bad);
+  flex-basis: 100%;
+}

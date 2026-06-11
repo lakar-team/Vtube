@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Local env
+.env
+.env.local
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
+*.log
+
+# VRM models are large binaries; keep them out of git unless the license
+# explicitly allows redistribution. The loader falls back to a hosted sample.
+public/models/*.vrm
