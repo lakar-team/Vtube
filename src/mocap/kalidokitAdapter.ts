@@ -80,7 +80,7 @@ function solveHand(
   landmarks: KalidokitHandLandmarks,
   side: "Left" | "Right",
 ): HandRotations {
-  const rigged = Hand.solve(landmarks, side, { runtime: "mediapipe" }) as unknown as Record<
+  const rigged = Hand.solve(landmarks, side) as unknown as Record<
     string,
     EulerRotation | undefined
   > | null;
