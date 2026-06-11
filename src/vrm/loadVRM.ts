@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { VRMLoaderPlugin, VRMUtils, type VRM } from "@pixiv/three-vrm";
+import { buildExpressionMap, type ExpressionMapping } from "./expressionMap";
 
 /**
  * Put your own avatar at public/models/avatar.vrm (see public/models/README.md).
@@ -17,6 +18,7 @@ export const FALLBACK_MODEL_URL =
 export interface LoadedVRM {
   vrm: VRM;
   sourceUrl: string;
+  expressionMap: ExpressionMapping;
 }
 
 async function loadFrom(url: string): Promise<VRM> {
@@ -54,19 +56,34 @@ async function loadFrom(url: string): Promise<VRM> {
  * Try the local model first, then fall back to the hosted sample.
  */
 export async function loadVRM(): Promise<LoadedVRM> {
+  let vrm: VRM;
+  let sourceUrl: string;
   try {
-    return { vrm: await loadFrom(LOCAL_MODEL_URL), sourceUrl: LOCAL_MODEL_URL };
+    vrm = await loadFrom(LOCAL_MODEL_URL);
+    sourceUrl = LOCAL_MODEL_URL;
   } catch (localErr) {
     console.info(
       `No local model at ${LOCAL_MODEL_URL} (drop one in public/models/). ` +
         `Falling back to hosted sample.`,
       localErr,
     );
-    return {
-      vrm: await loadFrom(FALLBACK_MODEL_URL),
-      sourceUrl: FALLBACK_MODEL_URL,
-    };
+    vrm = await loadFrom(FALLBACK_MODEL_URL);
+    sourceUrl = FALLBACK_MODEL_URL;
   }
+
+  // Inspect what expressions/blendshapes this specific model exposes (VRM 1.0
+  // presets, VRM 0.x BlendShapeClips, "Perfect Sync" custom expressions) and
+  // build the mocap-channel -> model-expression map. Logged once so it's
+  // visible in the console for debugging; the unsupported list also surfaces
+  // in the debug HUD.
+  const expressionMap = buildExpressionMap(vrm);
+  console.info(
+    `[vrm] expression mapping: ${expressionMap.map.size}/${expressionMap.total} ` +
+      `mocap channels supported by this model.`,
+    { unsupported: expressionMap.unsupported },
+  );
+
+  return { vrm, sourceUrl, expressionMap };
 }
 
 export function disposeVRM(vrm: VRM): void {

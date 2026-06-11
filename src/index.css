@@ -243,3 +243,14 @@ footer {
   color: var(--bad);
   flex-basis: 100%;
 }
+
+.hud-warning {
+  color: #ffb86c;
+  flex-basis: 100%;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.hud-expr-support strong {
+  color: var(--text);
+}

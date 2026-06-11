@@ -14,6 +14,16 @@ const POSE_CONNECTIONS: ReadonlyArray<readonly [number, number]> = [
   [23, 24], // hips
 ];
 
+/** Hand bone connections (MediaPipe hand landmark indices, 21 points). */
+const HAND_CONNECTIONS: ReadonlyArray<readonly [number, number]> = [
+  [0, 1], [1, 2], [2, 3], [3, 4], // thumb
+  [0, 5], [5, 6], [6, 7], [7, 8], // index
+  [5, 9], [9, 10], [10, 11], [11, 12], // middle
+  [9, 13], [13, 14], [14, 15], [15, 16], // ring
+  [13, 17], [17, 18], [18, 19], [19, 20], // little
+  [0, 17], // palm
+];
+
 export interface WebcamViewProps {
   videoRef: MutableRefObject<HTMLVideoElement | null>;
   debugLandmarksRef: MutableRefObject<DebugLandmarks>;
@@ -53,7 +63,7 @@ export function WebcamView({
       ctx.clearRect(0, 0, w, h);
       if (!showOverlay) return;
 
-      const { face, pose } = debugLandmarksRef.current;
+      const { face, pose, leftHand, rightHand } = debugLandmarksRef.current;
 
       if (face) {
         ctx.fillStyle = "rgba(80, 250, 123, 0.85)";
@@ -82,6 +92,27 @@ export function WebcamView({
           if (!p || (p.visibility ?? 1) < 0.5) continue;
           ctx.beginPath();
           ctx.arc(p.x * w, p.y * h, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      for (const hand of [leftHand, rightHand]) {
+        if (!hand) continue;
+        ctx.strokeStyle = "rgba(140, 220, 255, 0.9)";
+        ctx.lineWidth = 1.5;
+        for (const [a, b] of HAND_CONNECTIONS) {
+          const pa = hand[a];
+          const pb = hand[b];
+          if (!pa || !pb) continue;
+          ctx.beginPath();
+          ctx.moveTo(pa.x * w, pa.y * h);
+          ctx.lineTo(pb.x * w, pb.y * h);
+          ctx.stroke();
+        }
+        ctx.fillStyle = "rgba(140, 220, 255, 0.95)";
+        for (const p of hand) {
+          ctx.beginPath();
+          ctx.arc(p.x * w, p.y * h, 2, 0, Math.PI * 2);
           ctx.fill();
         }
       }

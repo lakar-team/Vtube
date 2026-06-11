@@ -1,13 +1,18 @@
 import type {
   FaceLandmarkerResult,
+  HandLandmarkerResult,
   PoseLandmarkerResult,
 } from "@mediapipe/tasks-vision";
-import { Face, Pose } from "kalidokit";
+import { Face, Hand, Pose } from "kalidokit";
 import {
+  ARKIT_BLENDSHAPE_NAMES,
   emptyFrame,
   zeroEuler,
+  type ArkitBlendshapeName,
   type DebugLandmarks,
   type EulerRotation,
+  type FingerSegment,
+  type HandRotations,
   type MocapFrame,
 } from "./types";
 import { clamp } from "../utils/math";
@@ -32,12 +37,89 @@ import { clamp } from "../utils/math";
  */
 
 type KalidokitLandmarks = Parameters<typeof Face.solve>[0];
+type KalidokitHandLandmarks = Parameters<typeof Hand.solve>[0];
 
 const UPPER_BODY_POSE_INDICES = [11, 12, 13, 14, 15, 16] as const; // shoulders/elbows/wrists
 
 function mirrorEuler(e: EulerRotation): EulerRotation {
   // Mirroring about the vertical axis flips yaw and roll, keeps pitch.
   return { x: e.x, y: -e.y, z: -e.z };
+}
+
+/**
+ * Maps VRM humanoid finger-bone segment names to the corresponding key
+ * suffix in Kalidokit's `Hand.solve` result (e.g. result[`${side}IndexProximal`]).
+ * The thumb is special-cased: Kalidokit's 3-segment thumb
+ * (Proximal/Intermediate/Distal) maps onto VRM's
+ * Metacarpal/Proximal/Distal.
+ */
+const FINGER_KALIDOKIT_SUFFIX: Record<FingerSegment, string> = {
+  thumbMetacarpal: "ThumbProximal",
+  thumbProximal: "ThumbIntermediate",
+  thumbDistal: "ThumbDistal",
+  indexProximal: "IndexProximal",
+  indexIntermediate: "IndexIntermediate",
+  indexDistal: "IndexDistal",
+  middleProximal: "MiddleProximal",
+  middleIntermediate: "MiddleIntermediate",
+  middleDistal: "MiddleDistal",
+  ringProximal: "RingProximal",
+  ringIntermediate: "RingIntermediate",
+  ringDistal: "RingDistal",
+  littleProximal: "LittleProximal",
+  littleIntermediate: "LittleIntermediate",
+  littleDistal: "LittleDistal",
+};
+
+/**
+ * Solve one hand's 21 landmarks via Kalidokit and remap onto VRM finger-bone
+ * segment names. `side` is whatever label MediaPipe assigned ("Left" |
+ * "Right") — mirroring (if any) is applied afterwards by the caller.
+ */
+function solveHand(
+  landmarks: KalidokitHandLandmarks,
+  side: "Left" | "Right",
+): HandRotations {
+  const rigged = Hand.solve(landmarks, side, { runtime: "mediapipe" }) as unknown as Record<
+    string,
+    EulerRotation | undefined
+  > | null;
+
+  const out: HandRotations = {};
+  if (!rigged) return out;
+
+  for (const segment of Object.keys(FINGER_KALIDOKIT_SUFFIX) as FingerSegment[]) {
+    const key = `${side}${FINGER_KALIDOKIT_SUFFIX[segment]}`;
+    const rot = rigged[key];
+    if (rot) out[segment] = { x: rot.x, y: rot.y, z: rot.z };
+  }
+  return out;
+}
+
+function mirrorHand(hand: HandRotations): HandRotations {
+  const out: HandRotations = {};
+  for (const segment of Object.keys(hand) as FingerSegment[]) {
+    const rot = hand[segment];
+    if (rot) out[segment] = mirrorEuler(rot);
+  }
+  return out;
+}
+
+/**
+ * Mirror left/right-paired ARKit + VRM-preset expression channels in place.
+ * Any channel name ending in "Left" that has a "...Right" counterpart gets
+ * swapped (covers blinkLeft/blinkRight, browDownLeft/Right,
+ * eyeLookInLeft/Right, etc).
+ */
+function mirrorExpressions(expr: MocapFrame["expressions"]): void {
+  for (const key of Object.keys(expr) as ArkitBlendshapeName[]) {
+    if (!key.endsWith("Left")) continue;
+    const rightKey = (key.slice(0, -4) + "Right") as keyof MocapFrame["expressions"];
+    if (!(rightKey in expr)) continue;
+    const tmp = expr[key as keyof MocapFrame["expressions"]];
+    expr[key as keyof MocapFrame["expressions"]] = expr[rightKey];
+    expr[rightKey] = tmp;
+  }
 }
 
 export interface SolveOptions {
@@ -55,11 +137,12 @@ export interface SolveResult {
 export function solveMocapFrame(
   faceResult: FaceLandmarkerResult | null,
   poseResult: PoseLandmarkerResult | null,
+  handResult: HandLandmarkerResult | null,
   video: HTMLVideoElement,
   { mirror, t }: SolveOptions,
 ): SolveResult {
   const frame = emptyFrame(t);
-  const debug: DebugLandmarks = { face: null, pose: null };
+  const debug: DebugLandmarks = { face: null, pose: null, leftHand: null, rightHand: null };
 
   // ---------------------------------------------------------------- face
   const faceLm = faceResult?.faceLandmarks?.[0];
@@ -122,6 +205,17 @@ export function solveMocapFrame(
         frame.expressions.aa = clamp(Math.max(frame.expressions.aa, jawOpen * 0.9), 0, 1);
       }
 
+      // Full 52-channel ARKit blendshape passthrough — raw 0..1 values from
+      // MediaPipe, in the subject's anatomical frame. These drive eyebrows,
+      // cheeks, tongue, jaw direction, etc on models that expose matching
+      // VRM 1.0 expressions / "Perfect Sync" custom expressions
+      // (see vrm/expressionMap.ts). Models without these channels simply
+      // never get a mapping for them — no-op.
+      for (const name of ARKIT_BLENDSHAPE_NAMES) {
+        const score = blend.get(name);
+        if (score !== undefined) frame.expressions[name] = clamp(score, 0, 1);
+      }
+
       frame.confidence.face = 1;
     }
   }
@@ -168,15 +262,40 @@ export function solveMocapFrame(
     }
   }
 
+  // ---------------------------------------------------------------- hands
+  const handLm = handResult?.landmarks;
+  const handedness = handResult?.handedness;
+  if (handLm && handedness) {
+    for (let i = 0; i < handLm.length; i++) {
+      const lm = handLm[i];
+      const label = handedness[i]?.[0]?.categoryName;
+      const score = handedness[i]?.[0]?.score ?? 0;
+      if (!lm || lm.length < 21) continue;
+      if (label !== "Left" && label !== "Right") continue;
+
+      const rotations = solveHand(lm as unknown as KalidokitHandLandmarks, label);
+
+      if (label === "Left") {
+        debug.leftHand = lm;
+        frame.hands.left = rotations;
+        frame.hands.leftTracked = true;
+        frame.confidence.leftHand = score;
+      } else {
+        debug.rightHand = lm;
+        frame.hands.right = rotations;
+        frame.hands.rightTracked = true;
+        frame.confidence.rightHand = score;
+      }
+    }
+  }
+
   // -------------------------------------------------------------- mirror
   if (mirror) {
     frame.head = mirrorEuler(frame.head);
     frame.spine = mirrorEuler(frame.spine);
     frame.pupil = { x: -frame.pupil.x, y: frame.pupil.y };
 
-    const { blinkLeft, blinkRight } = frame.expressions;
-    frame.expressions.blinkLeft = blinkRight;
-    frame.expressions.blinkRight = blinkLeft;
+    mirrorExpressions(frame.expressions);
 
     frame.arms = {
       leftUpperArm: mirrorEuler(frame.arms.rightUpperArm),
@@ -184,6 +303,20 @@ export function solveMocapFrame(
       rightUpperArm: mirrorEuler(frame.arms.leftUpperArm),
       rightLowerArm: mirrorEuler(frame.arms.leftLowerArm),
     };
+
+    const { left, right, leftTracked, rightTracked } = frame.hands;
+    frame.hands = {
+      left: right ? mirrorHand(right) : null,
+      right: left ? mirrorHand(left) : null,
+      leftTracked: rightTracked,
+      rightTracked: leftTracked,
+    };
+    const { leftHand, rightHand } = frame.confidence;
+    frame.confidence.leftHand = rightHand;
+    frame.confidence.rightHand = leftHand;
+    const { leftHand: dbgL, rightHand: dbgR } = debug;
+    debug.leftHand = dbgR;
+    debug.rightHand = dbgL;
   }
 
   // When pose is lost, keep arms at zero (the rig layer eases toward a

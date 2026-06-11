@@ -1,6 +1,7 @@
 import {
   FaceLandmarker,
   FilesetResolver,
+  HandLandmarker,
   PoseLandmarker,
 } from "@mediapipe/tasks-vision";
 
@@ -31,16 +32,22 @@ const FACE_MODEL_URL =
 const POSE_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
 
+// HandLandmarker: 21 landmarks per hand, up to 2 hands. Used for finger
+// rigging via Kalidokit's Hand solver.
+const HAND_MODEL_URL =
+  "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+
 export interface Landmarkers {
   face: FaceLandmarker;
   pose: PoseLandmarker;
+  hand: HandLandmarker;
   close: () => void;
 }
 
 export async function createLandmarkers(): Promise<Landmarkers> {
   const fileset = await FilesetResolver.forVisionTasks(WASM_BASE);
 
-  const [face, pose] = await Promise.all([
+  const [face, pose, hand] = await Promise.all([
     FaceLandmarker.createFromOptions(fileset, {
       baseOptions: {
         modelAssetPath: FACE_MODEL_URL,
@@ -65,14 +72,27 @@ export async function createLandmarkers(): Promise<Landmarkers> {
       minPosePresenceConfidence: 0.5,
       minTrackingConfidence: 0.5,
     }),
+    HandLandmarker.createFromOptions(fileset, {
+      baseOptions: {
+        modelAssetPath: HAND_MODEL_URL,
+        delegate: "GPU",
+      },
+      runningMode: "VIDEO",
+      numHands: 2,
+      minHandDetectionConfidence: 0.5,
+      minHandPresenceConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    }),
   ]);
 
   return {
     face,
     pose,
+    hand,
     close: () => {
       face.close();
       pose.close();
+      hand.close();
     },
   };
 }

@@ -2,12 +2,15 @@ import { useEffect, useState } from "react";
 import type { MutableRefObject } from "react";
 import type { MocapFrame } from "../mocap/types";
 import type { MocapState } from "../mocap/useMocap";
+import type { ExpressionMapping } from "../vrm/expressionMap";
 import { fmt, radToDeg } from "../utils/math";
 
 export interface DebugHUDProps {
   state: MocapState;
   rawFrameRef: MutableRefObject<MocapFrame | null>;
   frameRef: MutableRefObject<MocapFrame | null>;
+  /** Per-model blendshape support summary, once the VRM has loaded. */
+  expressionMap?: ExpressionMapping | null;
 }
 
 interface HudSample {
@@ -19,13 +22,15 @@ interface HudSample {
   smAa: number;
   faceTracked: boolean;
   poseTracked: boolean;
+  leftHandTracked: boolean;
+  rightHandTracked: boolean;
 }
 
 /**
  * FPS, tracking confidence, and raw-vs-smoothed channel readouts.
  * Polls the frame refs at 5 Hz instead of re-rendering at video rate.
  */
-export function DebugHUD({ state, rawFrameRef, frameRef }: DebugHUDProps) {
+export function DebugHUD({ state, rawFrameRef, frameRef, expressionMap }: DebugHUDProps) {
   const [sample, setSample] = useState<HudSample | null>(null);
 
   useEffect(() => {
@@ -42,6 +47,8 @@ export function DebugHUD({ state, rawFrameRef, frameRef }: DebugHUDProps) {
         smAa: sm.expressions.aa,
         faceTracked: raw.faceTracked,
         poseTracked: raw.poseTracked,
+        leftHandTracked: raw.hands.leftTracked,
+        rightHandTracked: raw.hands.rightTracked,
       });
     }, 200);
     return () => clearInterval(id);
@@ -63,6 +70,16 @@ export function DebugHUD({ state, rawFrameRef, frameRef }: DebugHUDProps) {
         <span>pose</span>
         <strong className={sample?.poseTracked ? "ok" : "bad"}>
           {sample?.poseTracked ? `tracked (${state.poseConfidence.toFixed(2)})` : "lost"}
+        </strong>
+      </div>
+      <div className="hud-row">
+        <span>left hand</span>
+        <strong className={sample?.leftHandTracked ? "ok" : "bad"}>
+          {sample?.leftHandTracked ? "tracked" : "lost"}
+        </strong>
+        <span>right hand</span>
+        <strong className={sample?.rightHandTracked ? "ok" : "bad"}>
+          {sample?.rightHandTracked ? "tracked" : "lost"}
         </strong>
       </div>
       {sample && (
@@ -98,6 +115,21 @@ export function DebugHUD({ state, rawFrameRef, frameRef }: DebugHUDProps) {
             </tr>
           </tbody>
         </table>
+      )}
+      {expressionMap && (
+        <div className="hud-row hud-expr-support">
+          <span>blendshapes</span>
+          <strong>
+            {expressionMap.map.size}/{expressionMap.total} supported
+          </strong>
+        </div>
+      )}
+      {expressionMap && expressionMap.unsupported.length > 0 && (
+        <div className="hud-warning">
+          This model doesn't support {expressionMap.unsupported.length} mocap
+          channel{expressionMap.unsupported.length === 1 ? "" : "s"} (skipped):{" "}
+          {expressionMap.unsupported.join(", ")}
+        </div>
       )}
       {state.error && <div className="hud-error">{state.error}</div>}
     </div>

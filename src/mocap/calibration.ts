@@ -1,6 +1,6 @@
 import {
+  ALL_EXPRESSION_KEYS,
   ARM_KEYS,
-  EXPRESSION_KEYS,
   zeroEuler,
   zeroExpressions,
   type ArmRotations,
@@ -89,7 +89,7 @@ export class CalibrationRecorder {
       data.head.z += s.head.z / n;
       data.pupil.x += s.pupil.x / n;
       data.pupil.y += s.pupil.y / n;
-      for (const k of EXPRESSION_KEYS) {
+      for (const k of ALL_EXPRESSION_KEYS) {
         data.expressionBaseline[k] += s.expressions[k] / n;
       }
       if (s.poseTracked) poseSamples++;
@@ -145,7 +145,7 @@ export function applyCalibration(
     arms: { ...frame.arms },
   };
 
-  for (const k of EXPRESSION_KEYS) {
+  for (const k of ALL_EXPRESSION_KEYS) {
     out.expressions[k] = remapExpression(
       frame.expressions[k],
       calib.expressionBaseline[k],

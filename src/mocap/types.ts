@@ -20,7 +20,123 @@ export const EXPRESSION_KEYS = [
 
 export type ExpressionKey = (typeof EXPRESSION_KEYS)[number];
 
-export type ExpressionValues = Record<ExpressionKey, number>;
+/**
+ * The full 52 ARKit-style blendshape names that MediaPipe's FaceLandmarker
+ * can output (`outputFaceBlendshapes: true`). Names match
+ * `faceBlendshapes[0].categories[i].categoryName` exactly, and also match
+ * the "Perfect Sync" custom expression names some VRoid/VRM exports use.
+ *
+ * (`_neutral` is intentionally excluded — it's not a drivable channel.)
+ */
+export const ARKIT_BLENDSHAPE_NAMES = [
+  "browDownLeft",
+  "browDownRight",
+  "browInnerUp",
+  "browOuterUpLeft",
+  "browOuterUpRight",
+  "cheekPuff",
+  "cheekSquintLeft",
+  "cheekSquintRight",
+  "eyeBlinkLeft",
+  "eyeBlinkRight",
+  "eyeLookDownLeft",
+  "eyeLookDownRight",
+  "eyeLookInLeft",
+  "eyeLookInRight",
+  "eyeLookOutLeft",
+  "eyeLookOutRight",
+  "eyeLookUpLeft",
+  "eyeLookUpRight",
+  "eyeSquintLeft",
+  "eyeSquintRight",
+  "eyeWideLeft",
+  "eyeWideRight",
+  "jawForward",
+  "jawLeft",
+  "jawOpen",
+  "jawRight",
+  "mouthClose",
+  "mouthDimpleLeft",
+  "mouthDimpleRight",
+  "mouthFrownLeft",
+  "mouthFrownRight",
+  "mouthFunnel",
+  "mouthLeft",
+  "mouthLowerDownLeft",
+  "mouthLowerDownRight",
+  "mouthPressLeft",
+  "mouthPressRight",
+  "mouthPucker",
+  "mouthRight",
+  "mouthRollLower",
+  "mouthRollUpper",
+  "mouthShrugLower",
+  "mouthShrugUpper",
+  "mouthSmileLeft",
+  "mouthSmileRight",
+  "mouthStretchLeft",
+  "mouthStretchRight",
+  "mouthUpperUpLeft",
+  "mouthUpperUpRight",
+  "noseSneerLeft",
+  "noseSneerRight",
+  "tongueOut",
+] as const;
+
+export type ArkitBlendshapeName = (typeof ARKIT_BLENDSHAPE_NAMES)[number];
+
+/**
+ * Every channel name that can appear in `MocapFrame.expressions`: the VRM
+ * vowel/blink preset names we've always driven, plus the full raw ARKit
+ * blendshape set. There is intentional overlap (e.g. `eyeBlinkLeft` vs
+ * `blinkLeft`) — `expressions.blinkLeft` is our best-effort blink value
+ * (blendshape with Kalidokit fallback, see kalidokitAdapter), while
+ * `expressions.eyeBlinkLeft` is the raw MediaPipe blendshape passthrough
+ * used for "Perfect Sync" models that expose that exact channel name.
+ */
+export const ALL_EXPRESSION_KEYS = [
+  ...EXPRESSION_KEYS,
+  ...ARKIT_BLENDSHAPE_NAMES,
+] as const;
+
+export type AllExpressionKey = (typeof ALL_EXPRESSION_KEYS)[number];
+
+export type ExpressionValues = Record<AllExpressionKey, number>;
+
+/**
+ * VRM humanoid finger-bone "segments" (without the left/right prefix), per
+ * the VRM humanoid spec. Thumb has Metacarpal/Proximal/Distal (no
+ * intermediate); the other four fingers have Proximal/Intermediate/Distal.
+ */
+export const FINGER_SEGMENTS = [
+  "thumbMetacarpal",
+  "thumbProximal",
+  "thumbDistal",
+  "indexProximal",
+  "indexIntermediate",
+  "indexDistal",
+  "middleProximal",
+  "middleIntermediate",
+  "middleDistal",
+  "ringProximal",
+  "ringIntermediate",
+  "ringDistal",
+  "littleProximal",
+  "littleIntermediate",
+  "littleDistal",
+] as const;
+
+export type FingerSegment = (typeof FINGER_SEGMENTS)[number];
+
+/** Per-hand finger bone rotations, keyed by segment (sparse). */
+export type HandRotations = Partial<Record<FingerSegment, EulerRotation>>;
+
+export interface HandsFrame {
+  left: HandRotations | null;
+  right: HandRotations | null;
+  leftTracked: boolean;
+  rightTracked: boolean;
+}
 
 export interface ArmRotations {
   leftUpperArm: EulerRotation;
@@ -54,13 +170,16 @@ export interface MocapFrame {
   pupil: { x: number; y: number };
   expressions: ExpressionValues;
   arms: ArmRotations;
-  confidence: { face: number; pose: number };
+  hands: HandsFrame;
+  confidence: { face: number; pose: number; leftHand: number; rightHand: number };
 }
 
 /** Raw landmark arrays kept around for the debug overlay. */
 export interface DebugLandmarks {
   face: NormalizedLandmark[] | null;
   pose: NormalizedLandmark[] | null;
+  leftHand: NormalizedLandmark[] | null;
+  rightHand: NormalizedLandmark[] | null;
 }
 
 export function zeroEuler(): EulerRotation {
@@ -68,7 +187,13 @@ export function zeroEuler(): EulerRotation {
 }
 
 export function zeroExpressions(): ExpressionValues {
-  return { blinkLeft: 0, blinkRight: 0, aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 };
+  const out = {} as ExpressionValues;
+  for (const k of ALL_EXPRESSION_KEYS) out[k] = 0;
+  return out;
+}
+
+export function emptyHandsFrame(): HandsFrame {
+  return { left: null, right: null, leftTracked: false, rightTracked: false };
 }
 
 export function emptyFrame(t = 0): MocapFrame {
@@ -86,6 +211,7 @@ export function emptyFrame(t = 0): MocapFrame {
       rightUpperArm: zeroEuler(),
       rightLowerArm: zeroEuler(),
     },
-    confidence: { face: 0, pose: 0 },
+    hands: emptyHandsFrame(),
+    confidence: { face: 0, pose: 0, leftHand: 0, rightHand: 0 },
   };
 }

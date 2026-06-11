@@ -5,12 +5,14 @@ import { CalibrationPanel } from "./components/CalibrationPanel";
 import { DebugHUD } from "./components/DebugHUD";
 import { useWebcam } from "./hooks/useWebcam";
 import { useMocap } from "./mocap/useMocap";
+import type { ExpressionMapping } from "./vrm/expressionMap";
 
 export default function App() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   const [mirror, setMirror] = useState(true);
   const [showOverlay, setShowOverlay] = useState(true);
+  const [expressionMap, setExpressionMap] = useState<ExpressionMapping | null>(null);
 
   const webcam = useWebcam(videoRef);
   const mocap = useMocap(videoRef, { mirror, enabled: webcam.ready });
@@ -63,7 +65,7 @@ export default function App() {
         </section>
 
         <section className="pane">
-          <AvatarViewport frameRef={mocap.frameRef} />
+          <AvatarViewport frameRef={mocap.frameRef} onExpressionMap={setExpressionMap} />
         </section>
       </main>
 
@@ -72,6 +74,7 @@ export default function App() {
           state={mocap.state}
           rawFrameRef={mocap.rawFrameRef}
           frameRef={mocap.frameRef}
+          expressionMap={expressionMap}
         />
       </footer>
     </div>

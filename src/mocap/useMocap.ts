@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { MutableRefObject, RefObject } from "react";
 import type {
   FaceLandmarkerResult,
+  HandLandmarkerResult,
   PoseLandmarkerResult,
 } from "@mediapipe/tasks-vision";
 import { createLandmarkers, type Landmarkers } from "./landmarkers";
@@ -69,7 +70,12 @@ export function useMocap(
 ): UseMocapResult {
   const frameRef = useRef<MocapFrame | null>(null);
   const rawFrameRef = useRef<MocapFrame | null>(null);
-  const debugLandmarksRef = useRef<DebugLandmarks>({ face: null, pose: null });
+  const debugLandmarksRef = useRef<DebugLandmarks>({
+    face: null,
+    pose: null,
+    leftHand: null,
+    rightHand: null,
+  });
 
   const [state, setState] = useState<MocapState>(INITIAL_STATE);
 
@@ -141,18 +147,20 @@ export function useMocap(
 
       let faceResult: FaceLandmarkerResult | null = null;
       let poseResult: PoseLandmarkerResult | null = null;
+      let handResult: HandLandmarkerResult | null = null;
       try {
         faceResult = landmarkers.face.detectForVideo(video, nowMs);
-        // Pose gets a strictly-increasing timestamp too; sharing nowMs of the
-        // same frame is fine because they are independent task instances.
+        // Pose/hand get a strictly-increasing timestamp too; sharing nowMs of
+        // the same frame is fine because they are independent task instances.
         poseResult = landmarkers.pose.detectForVideo(video, nowMs);
+        handResult = landmarkers.hand.detectForVideo(video, nowMs);
       } catch (err) {
         // A single failed inference shouldn't kill the loop.
         console.warn("mediapipe detect error", err);
         return;
       }
 
-      const { frame: raw, debug } = solveMocapFrame(faceResult, poseResult, video, {
+      const { frame: raw, debug } = solveMocapFrame(faceResult, poseResult, handResult, video, {
         mirror: mirrorRef.current,
         t: nowMs / 1000,
       });

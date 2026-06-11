@@ -1,8 +1,10 @@
 import { OneEuroFilter, type OneEuroParams } from "./oneEuroFilter";
 import {
+  ALL_EXPRESSION_KEYS,
   ARM_KEYS,
-  EXPRESSION_KEYS,
+  FINGER_SEGMENTS,
   type EulerRotation,
+  type HandRotations,
   type MocapFrame,
 } from "./types";
 
@@ -23,6 +25,9 @@ export const SMOOTHING_PARAMS = {
   rotation: { minCutoff: 1.0, beta: 0.6, dCutoff: 1.0 } satisfies OneEuroParams,
   expression: { minCutoff: 2.0, beta: 0.8, dCutoff: 1.0 } satisfies OneEuroParams,
   pupil: { minCutoff: 0.8, beta: 0.4, dCutoff: 1.0 } satisfies OneEuroParams,
+  // Fingers move fast (taps, gestures) but webcam hand landmarks are noisy —
+  // a touch snappier than body rotation smoothing.
+  finger: { minCutoff: 1.2, beta: 0.7, dCutoff: 1.0 } satisfies OneEuroParams,
 };
 
 /**
@@ -60,6 +65,22 @@ function smoothEuler(
   };
 }
 
+function smoothHand(
+  bank: FilterBank,
+  side: "left" | "right",
+  hand: HandRotations | null,
+  t: number,
+): HandRotations | null {
+  if (!hand) return null;
+  const out: HandRotations = {};
+  for (const segment of FINGER_SEGMENTS) {
+    const rot = hand[segment];
+    if (!rot) continue;
+    out[segment] = smoothEuler(bank, `hand.${side}.${segment}`, rot, t, SMOOTHING_PARAMS.finger);
+  }
+  return out;
+}
+
 /**
  * Smooth every channel of a (calibrated) mocap frame.
  * Runs between calibration and the VRM rig update.
@@ -76,9 +97,10 @@ export function smoothFrame(bank: FilterBank, frame: MocapFrame): MocapFrame {
     },
     expressions: { ...frame.expressions },
     arms: { ...frame.arms },
+    hands: { ...frame.hands },
   };
 
-  for (const k of EXPRESSION_KEYS) {
+  for (const k of ALL_EXPRESSION_KEYS) {
     out.expressions[k] = bank.value(
       `expr.${k}`,
       SMOOTHING_PARAMS.expression,
@@ -96,6 +118,9 @@ export function smoothFrame(bank: FilterBank, frame: MocapFrame): MocapFrame {
       SMOOTHING_PARAMS.rotation,
     );
   }
+
+  out.hands.left = smoothHand(bank, "left", frame.hands.left, t);
+  out.hands.right = smoothHand(bank, "right", frame.hands.right, t);
 
   return out;
 }

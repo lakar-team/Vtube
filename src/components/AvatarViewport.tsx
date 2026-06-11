@@ -4,11 +4,15 @@ import * as THREE from "three";
 import type { VRM } from "@pixiv/three-vrm";
 import { disposeVRM, loadVRM } from "../vrm/loadVRM";
 import { applyMocapToVRM } from "../vrm/applyMocapToVRM";
+import type { ExpressionMapping } from "../vrm/expressionMap";
 import type { MocapFrame } from "../mocap/types";
 
 export interface AvatarViewportProps {
   /** Smoothed mocap output from useMocap. */
   frameRef: MutableRefObject<MocapFrame | null>;
+  /** Called once the VRM loads with its blendshape support summary, for the
+   *  debug HUD's "unsupported channels" warning. */
+  onExpressionMap?: (mapping: ExpressionMapping) => void;
 }
 
 type LoadState =
@@ -20,9 +24,10 @@ type LoadState =
  * Three.js viewport: renders the VRM and applies the latest mocap frame on
  * every render tick.
  */
-export function AvatarViewport({ frameRef }: AvatarViewportProps) {
+export function AvatarViewport({ frameRef, onExpressionMap }: AvatarViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [load, setLoad] = useState<LoadState>({ phase: "loading" });
+  const expressionMapRef = useRef<ExpressionMapping | undefined>(undefined);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -64,12 +69,14 @@ export function AvatarViewport({ frameRef }: AvatarViewportProps) {
     let vrm: VRM | null = null;
 
     loadVRM()
-      .then(({ vrm: loaded, sourceUrl }) => {
+      .then(({ vrm: loaded, sourceUrl, expressionMap }) => {
         if (disposed) {
           disposeVRM(loaded);
           return;
         }
         vrm = loaded;
+        expressionMapRef.current = expressionMap;
+        onExpressionMap?.(expressionMap);
         if (vrm.lookAt) vrm.lookAt.target = lookAtTarget;
         scene.add(vrm.scene);
         setLoad({ phase: "ready", source: sourceUrl });
@@ -90,7 +97,7 @@ export function AvatarViewport({ frameRef }: AvatarViewportProps) {
       const delta = clock.getDelta();
       if (vrm) {
         const frame = frameRef.current;
-        if (frame) applyMocapToVRM(vrm, frame, lookAtTarget);
+        if (frame) applyMocapToVRM(vrm, frame, lookAtTarget, expressionMapRef.current);
         vrm.update(delta); // applies expressions, lookAt, spring bones
       }
       renderer.render(scene, camera);

@@ -1,10 +1,12 @@
 import * as THREE from "three";
 import type { VRM, VRMHumanBoneName } from "@pixiv/three-vrm";
 import {
-  EXPRESSION_KEYS,
+  FINGER_SEGMENTS,
   type EulerRotation,
+  type HandRotations,
   type MocapFrame,
 } from "../mocap/types";
+import type { ExpressionMapping } from "./expressionMap";
 
 /**
  * Rig mapping layer: smoothed Kalidokit output -> three-vrm humanoid.
@@ -28,6 +30,8 @@ export const RIG_LERP = {
   head: 0.7,
   body: 0.5,
   armRelaxReturn: 0.07, // ease-back speed when pose tracking drops out
+  fingers: 0.6,
+  fingerRelaxReturn: 0.1, // ease-back speed when a hand drops out of frame
 } as const;
 
 /** How much of the solved head rotation goes to head vs neck bone. */
@@ -85,6 +89,29 @@ function easeToward(
   node.quaternion.slerp(target, lerp);
 }
 
+const _identityQuat = new THREE.Quaternion();
+
+/**
+ * Apply one hand's solved finger rotations to the VRM's finger bones.
+ * Bone names are `${side}${SegmentPascalCase}`, e.g. "leftThumbMetacarpal",
+ * "rightIndexIntermediate" — part of the VRM humanoid spec, so this works on
+ * any VRM-compliant rig that has finger bones. Bones the model doesn't have
+ * (`getNormalizedBoneNode` returns null) are silently skipped.
+ */
+function applyHand(vrm: VRM, side: "left" | "right", hand: HandRotations | null): void {
+  for (const segment of FINGER_SEGMENTS) {
+    const boneName = (side + segment[0].toUpperCase() + segment.slice(1)) as VRMHumanBoneName;
+    const rot = hand?.[segment];
+    if (rot) {
+      rotateBone(vrm, boneName, rot, RIG_LERP.fingers);
+    } else {
+      // Hand not tracked / segment not solved: ease back to the rest pose
+      // (identity in normalized bone space) instead of freezing.
+      easeToward(vrm, boneName, _identityQuat, RIG_LERP.fingerRelaxReturn);
+    }
+  }
+}
+
 /**
  * Apply one smoothed mocap frame to the VRM.
  * Call once per render frame, BEFORE `vrm.update(delta)`.
@@ -96,6 +123,7 @@ export function applyMocapToVRM(
   vrm: VRM,
   frame: MocapFrame,
   lookAtTarget: THREE.Object3D | null,
+  expressionMap?: ExpressionMapping,
 ): void {
   // ---- head / neck (face solve)
   if (frame.faceTracked) {
@@ -117,13 +145,17 @@ export function applyMocapToVRM(
     }
   }
 
-  // ---- expressions (blink, vowels)
+  // ---- expressions (blink, vowels, full ARKit blendshapes if supported)
   const em = vrm.expressionManager;
-  if (em && frame.faceTracked) {
-    for (const key of EXPRESSION_KEYS) {
-      em.setValue(key, frame.expressions[key]);
+  if (em && frame.faceTracked && expressionMap) {
+    for (const [channel, vrmName] of expressionMap.map) {
+      em.setValue(vrmName, frame.expressions[channel]);
     }
   }
+
+  // ---- fingers (hand solve)
+  applyHand(vrm, "left", frame.hands.left);
+  applyHand(vrm, "right", frame.hands.right);
 
   // ---- eye gaze via lookAt target
   if (lookAtTarget && frame.faceTracked) {
