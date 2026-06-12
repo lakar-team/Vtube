@@ -24,11 +24,10 @@ npm run dev      # open http://localhost:5173, allow camera access
 Optionally drop a VRM avatar at `public/models/avatar.vrm` (see
 `public/models/README.md`); otherwise a hosted sample model is used.
 
-> **Note (Google Drive):** if this checkout lives on a Google Drive synced
-> folder, `npm install` can silently produce corrupted (zero-byte) files in
-> `node_modules`. Install/build from a copy on a local disk instead, e.g.:
-> `robocopy . %LOCALAPPDATA%\vtube-build /MIR /XD node_modules dist .git`
-> then `npm install` + `npm run build` there, and copy `dist` back.
+> **Note (Google Drive):** `npm install` silently corrupts `node_modules`
+> on Google Drive synced folders. Don't run npm here — use `.\build.ps1`,
+> which installs/builds in a local-disk mirror and copies `dist/` back.
+> See [BUILD.md](./BUILD.md).
 
 See [SETUP.md](./SETUP.md) for full setup, repo-push instructions, tuning
 notes, and known limitations.
