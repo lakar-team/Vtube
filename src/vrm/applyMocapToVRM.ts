@@ -62,8 +62,27 @@ export const RIG_LERP = {
 /** How much of the solved head rotation goes to head vs neck bone. */
 export const HEAD_NECK_SPLIT = 0.65;
 
-/** Damp spine motion — webcam torso estimates are coarse. */
+/** Damp spine yaw/roll — webcam shoulder-line estimates are coarse. */
 export const SPINE_DAMP = 0.4;
+
+/**
+ * Torso pitch (bowing) is solved geometrically from the hip->shoulder vector
+ * (see kalidokitAdapter) and is much steadier than yaw/roll, so it passes
+ * through nearly whole — a real bow should read as a bow.
+ */
+export const SPINE_PITCH_DAMP = 0.85;
+
+/**
+ * The solved torso rotation is distributed up the spine chain so a bow bends
+ * the whole upper body instead of hinging at a single joint. Weights sum to
+ * 1 and are renormalized over the bones this model actually has (chest and
+ * upperChest are optional in the VRM humanoid spec).
+ */
+export const SPINE_CHAIN: ReadonlyArray<readonly [VRMHumanBoneName, number]> = [
+  ["spine", 0.45],
+  ["chest", 0.35],
+  ["upperChest", 0.2],
+];
 
 /** Damp hip rotation — same reasoning as the spine. */
 export const HIPS_ROT_DAMP = 0.6;
@@ -107,6 +126,7 @@ const _euler = new THREE.Euler();
 const _quat = new THREE.Quaternion();
 const _identityQuat = new THREE.Quaternion();
 const _vec3 = new THREE.Vector3();
+const _spineRot: EulerRotation = { x: 0, y: 0, z: 0 };
 
 /** Rest-pose local position of the normalized hips node, cached per model. */
 const restHipsPosCache = new WeakMap<VRM, THREE.Vector3>();
@@ -199,18 +219,31 @@ export function applyMocapToVRM(
 
   // ---- torso + arms (pose solve)
   if (frame.poseTracked) {
-    rotateBone(vrm, signs, "spine", frame.spine, RIG_LERP.body, SPINE_DAMP);
+    _spineRot.x = frame.spine.x * SPINE_PITCH_DAMP;
+    _spineRot.y = frame.spine.y * SPINE_DAMP;
+    _spineRot.z = frame.spine.z * SPINE_DAMP;
+    let chainWeight = 0;
+    for (const [bone, weight] of SPINE_CHAIN) {
+      if (vrm.humanoid.getNormalizedBoneNode(bone)) chainWeight += weight;
+    }
+    for (const [bone, weight] of SPINE_CHAIN) {
+      rotateBone(vrm, signs, bone, _spineRot, RIG_LERP.body, weight / (chainWeight || 1));
+    }
     rotateBone(vrm, signs, "hips", frame.hips.rotation, RIG_LERP.hips, HIPS_ROT_DAMP);
     rotateBone(vrm, signs, "leftUpperArm", frame.arms.leftUpperArm, RIG_LERP.body);
     rotateBone(vrm, signs, "leftLowerArm", frame.arms.leftLowerArm, RIG_LERP.body);
     rotateBone(vrm, signs, "rightUpperArm", frame.arms.rightUpperArm, RIG_LERP.body);
     rotateBone(vrm, signs, "rightLowerArm", frame.arms.rightLowerArm, RIG_LERP.body);
   } else {
-    // No pose: ease the arms down to a natural resting pose.
+    // No pose: ease the arms down to a natural resting pose and straighten
+    // the torso instead of freezing mid-bend.
     for (const [bone, e] of RELAXED_ARM_EULERS) {
       _euler.set(e.x * signs.x, e.y * signs.y, e.z * signs.z, "XYZ");
       _quat.setFromEuler(_euler);
       easeBoneToward(vrm, bone, _quat, RIG_LERP.armRelaxReturn);
+    }
+    for (const [bone] of SPINE_CHAIN) {
+      easeBoneToward(vrm, bone, _identityQuat, RIG_LERP.armRelaxReturn);
     }
   }
 

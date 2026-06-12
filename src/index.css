@@ -189,6 +189,32 @@ body {
   border-radius: 6px;
 }
 
+.viewport-upload {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 11px;
+  padding: 3px 8px;
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--muted);
+}
+
+.viewport-upload:hover {
+  color: var(--text);
+}
+
+.viewport-upload-error {
+  position: absolute;
+  top: 38px;
+  right: 8px;
+  max-width: 60%;
+  background: rgba(0, 0, 0, 0.7);
+  color: var(--bad);
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 6px;
+}
+
 footer {
   flex: none;
 }

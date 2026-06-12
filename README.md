@@ -21,8 +21,9 @@ npm install
 npm run dev      # open http://localhost:5173, allow camera access
 ```
 
-Optionally drop a VRM avatar at `public/models/avatar.vrm` (see
-`public/models/README.md`); otherwise a hosted sample model is used.
+Load your own avatar with the **load VRM…** button in the viewer, or drop a
+default one at `public/models/avatar.vrm` (see `public/models/README.md`);
+otherwise a hosted sample model is used.
 
 > **Note (Google Drive):** `npm install` silently corrupts `node_modules`
 > on Google Drive synced folders. Don't run npm here — use `.\build.ps1`,

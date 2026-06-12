@@ -1,6 +1,7 @@
 import type {
   FaceLandmarkerResult,
   HandLandmarkerResult,
+  NormalizedLandmark,
   PoseLandmarkerResult,
 } from "@mediapipe/tasks-vision";
 import { Face, Hand, Pose } from "kalidokit";
@@ -42,16 +43,23 @@ import { clamp } from "../utils/math";
  * `UpperArm.r` is computed from landmarks 11/13 — MediaPipe's LEFT shoulder/
  * elbow. The subject's left arm drives the rig's RIGHT arm, i.e. the on-screen
  * mirror side. Legs are the same (calcLegs uses 23/25 for the "right" leg).
- * MediaPipe's hand `handedness` labels behave identically: they assume a
- * mirrored selfie image, so on our unmirrored video a label of "Left" is the
- * subject's anatomical RIGHT hand — which is exactly the avatar's left hand
- * in mirror mode.
  *
- * So: with `mirror: true` (the default VTuber UX) every Kalidokit/handedness
- * output is used AS-IS. With `mirror: false` we swap left/right pairs and
- * mirror each euler (flip yaw/roll). Earlier revisions had this backwards for
- * the body (swapped when mirroring), which un-mirrored arms/hands relative to
- * the face and made tracked movement look inverted.
+ * HANDS: HandLandmarker's `handedness` labels do NOT follow the old holistic
+ * "labels assume a mirrored selfie image" rule — on our unmirrored video,
+ * tasks-vision reports the subject's anatomical side (label "Left" = your
+ * left hand; verified empirically — trusting the holistic rule put every
+ * hand on the opposite avatar side from its pose-driven arm). To be robust
+ * against either convention we don't trust the label when a pose is tracked:
+ * each detected hand is matched to the nearest pose wrist landmark (15 =
+ * subject left, 16 = subject right) in image space. The label is only the
+ * fallback when the pose isn't visible. A subject-LEFT hand then drives the
+ * avatar's RIGHT side — the same pre-mirrored convention as the pose arms.
+ *
+ * So: with `mirror: true` (the default VTuber UX) every Kalidokit output is
+ * used AS-IS. With `mirror: false` we swap left/right pairs and mirror each
+ * euler (flip yaw/roll). Earlier revisions had this backwards for the body
+ * (swapped when mirroring), which un-mirrored arms/hands relative to the
+ * face and made tracked movement look inverted.
  *
  * The 52 MediaPipe blendshapes are the exception: their names are in the
  * SUBJECT's anatomical frame (eyeBlinkLeft = your left eye), so they swap on
@@ -70,6 +78,13 @@ const LEG_VISIBILITY_THRESHOLD = 0.6;
 function mirrorEuler(e: EulerRotation): EulerRotation {
   // Mirroring about the vertical axis flips yaw and roll, keeps pitch.
   return { x: e.x, y: -e.y, z: -e.z };
+}
+
+function midpoint3(
+  a: { x: number; y: number; z: number },
+  b: { x: number; y: number; z: number },
+): { x: number; y: number; z: number } {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 };
 }
 
 /**
@@ -104,9 +119,9 @@ interface SolvedHand {
 
 /**
  * Solve one hand's 21 landmarks via Kalidokit and remap onto VRM finger-bone
- * segment names plus the wrist. `side` is the avatar-side label from
- * MediaPipe handedness ("Left" | "Right") — un-mirroring (if any) is applied
- * afterwards by the caller.
+ * segment names plus the wrist. `side` is the AVATAR side in mirror
+ * convention (the subject's left hand solves as "Right" — see header
+ * comment); un-mirroring (if any) is applied afterwards by the caller.
  */
 function solveHand(
   landmarks: KalidokitHandLandmarks,
@@ -301,8 +316,24 @@ export function solveMocapFrame(
 
     if (riggedPose && frame.confidence.pose > 0.5) {
       frame.poseTracked = true;
+      // Kalidokit hard-zeroes Spine.x and Hips.rotation.x ("temp fix for
+      // inaccurate X axis" in its calcHips), so a bow never reached the torso
+      // — only the head/neck bent. Recover torso pitch ourselves from the
+      // world-landmark hip->shoulder vector: world y grows downward and z
+      // shrinks toward the camera, so bowing forward drives dz negative.
+      // atan2(dz, -dy) is 0 upright and negative when bowing, matching the
+      // head.x convention (pitch down = negative) so the same per-model sign
+      // mapping applies downstream.
+      const shoulderMid = midpoint3(poseWorld[11], poseWorld[12]);
+      const hipMid = midpoint3(poseWorld[23], poseWorld[24]);
+      const torsoPitch = clamp(
+        Math.atan2(shoulderMid.z - hipMid.z, -(shoulderMid.y - hipMid.y)),
+        -1.6,
+        1.6,
+      );
+
       frame.spine = {
-        x: riggedPose.Spine.x,
+        x: torsoPitch,
         y: riggedPose.Spine.y,
         z: riggedPose.Spine.z,
       };
@@ -354,16 +385,70 @@ export function solveMocapFrame(
   const handLm = handResult?.landmarks;
   const handedness = handResult?.handedness;
   if (handLm && handedness) {
+    // Pose wrist anchors for geometric side matching (see header comment) —
+    // image space, same coordinates as the hand landmarks.
+    const poseWristL = poseImage?.[15]; // subject's anatomical LEFT wrist
+    const poseWristR = poseImage?.[16]; // subject's anatomical RIGHT wrist
+    const anchors =
+      frame.poseTracked &&
+      poseWristL != null &&
+      poseWristR != null &&
+      (poseWristL.visibility ?? 0) > 0.5 &&
+      (poseWristR.visibility ?? 0) > 0.5
+        ? { left: poseWristL, right: poseWristR }
+        : null;
+
+    const dist = (a: NormalizedLandmark, b: NormalizedLandmark) =>
+      Math.hypot(a.x - b.x, a.y - b.y);
+
+    const detected: Array<{
+      lm: NormalizedLandmark[];
+      score: number;
+      /** Handedness label says subject-left (anatomical on unmirrored video). */
+      labelLeft: boolean;
+      dL: number;
+      dR: number;
+    }> = [];
     for (let i = 0; i < handLm.length; i++) {
       const lm = handLm[i];
       const label = handedness[i]?.[0]?.categoryName;
       const score = handedness[i]?.[0]?.score ?? 0;
       if (!lm || lm.length < 21) continue;
       if (label !== "Left" && label !== "Right") continue;
+      detected.push({
+        lm,
+        score,
+        labelLeft: label === "Left",
+        dL: anchors ? dist(lm[0], anchors.left) : Number.POSITIVE_INFINITY,
+        dR: anchors ? dist(lm[0], anchors.right) : Number.POSITIVE_INFINITY,
+      });
+    }
 
-      const { fingers, wrist } = solveHand(lm as unknown as KalidokitHandLandmarks, label);
+    // Which subject side is each hand? With two hands and a tracked pose,
+    // pick the joint assignment with the smaller total wrist distance so the
+    // two hands can never land on the same side.
+    let subjectLeft: boolean[];
+    if (anchors && detected.length === 2) {
+      subjectLeft =
+        detected[0].dL + detected[1].dR <= detected[0].dR + detected[1].dL
+          ? [true, false]
+          : [false, true];
+    } else {
+      subjectLeft = detected.map((h) => (anchors ? h.dL <= h.dR : h.labelLeft));
+    }
 
-      if (label === "Left") {
+    for (let i = 0; i < detected.length; i++) {
+      const { lm, score } = detected[i];
+      // Mirror convention (as-is application): the subject's LEFT hand drives
+      // the avatar's RIGHT side — the same side of the screen, matching the
+      // pre-mirrored pose-solver arms.
+      const avatarSide = subjectLeft[i] ? "Right" : "Left";
+      const { fingers, wrist } = solveHand(
+        lm as unknown as KalidokitHandLandmarks,
+        avatarSide,
+      );
+
+      if (avatarSide === "Left") {
         debug.leftHand = lm;
         frame.hands.left = fingers;
         frame.hands.leftWrist = wrist;
@@ -379,12 +464,14 @@ export function solveMocapFrame(
     }
   }
 
-  // Pose LeftHand pairs with handedness label "Left": both are the mirror
-  // side computed from the same physical hand, so they combine directly.
-  if (poseHandZ) {
-    if (frame.hands.leftWrist) frame.hands.leftWrist.z = poseHandZ.left;
-    if (frame.hands.rightWrist) frame.hands.rightWrist.z = poseHandZ.right;
-  }
+  // Wrist z (waving the hand left/right about the forearm axis): the hand
+  // solver's own z is a coarse palm-plane estimate scaled ~2.3x, which the
+  // Kalidokit reference rig discards entirely in favour of the pose solver's
+  // forearm-based value. Same here: pose z when tracked, neutral otherwise.
+  // Pose "LeftHand" is the avatar-left side (subject's right hand), matching
+  // frame.hands.left — both pre-mirrored, so they pair directly.
+  if (frame.hands.leftWrist) frame.hands.leftWrist.z = poseHandZ?.left ?? 0;
+  if (frame.hands.rightWrist) frame.hands.rightWrist.z = poseHandZ?.right ?? 0;
 
   // -------------------------------------------------------------- mirror
   //

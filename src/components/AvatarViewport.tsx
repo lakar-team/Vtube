@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 import * as THREE from "three";
 import type { VRM } from "@pixiv/three-vrm";
-import { disposeVRM, loadVRM } from "../vrm/loadVRM";
+import { disposeVRM, loadVRM, loadVRMFromFile, type LoadedVRM } from "../vrm/loadVRM";
 import { applyMocapToVRM } from "../vrm/applyMocapToVRM";
 import type { ExpressionMapping } from "../vrm/expressionMap";
 import type { MocapFrame } from "../mocap/types";
@@ -37,8 +37,12 @@ type LoadState =
 export function AvatarViewport({ frameRef, viewMode = "bust", onExpressionMap }: AvatarViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [load, setLoad] = useState<LoadState>({ phase: "loading" });
+  /** Error from a user model upload — shown without discarding the current model. */
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const expressionMapRef = useRef<ExpressionMapping | undefined>(undefined);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  /** Set by the scene effect; lets the file picker swap in an uploaded VRM. */
+  const loadFileRef = useRef<((file: File) => void) | null>(null);
 
   // Reframe the existing camera when the view mode changes.
   useEffect(() => {
@@ -88,30 +92,54 @@ export function AvatarViewport({ frameRef, viewMode = "bust", onExpressionMap }:
     scene.add(grid);
 
     let vrm: VRM | null = null;
+    // Guards against a slow earlier load resolving after a newer one (e.g.
+    // the user picks a file while the default model is still downloading).
+    let loadGeneration = 0;
 
-    loadVRM()
-      .then(({ vrm: loaded, sourceUrl, expressionMap }) => {
-        if (disposed) {
-          disposeVRM(loaded);
-          return;
-        }
-        vrm = loaded;
-        expressionMapRef.current = expressionMap;
-        onExpressionMap?.(expressionMap);
-        if (vrm.lookAt) vrm.lookAt.target = lookAtTarget;
-        scene.add(vrm.scene);
-        setLoad({ phase: "ready", source: sourceUrl });
-      })
-      .catch((err: unknown) => {
-        if (!disposed) {
-          setLoad({
-            phase: "error",
-            message:
-              "Could not load a VRM model. Drop one at public/models/avatar.vrm. " +
-              (err instanceof Error ? err.message : String(err)),
-          });
-        }
-      });
+    const adopt = (loaded: LoadedVRM) => {
+      if (vrm) {
+        scene.remove(vrm.scene);
+        disposeVRM(vrm);
+      }
+      vrm = loaded.vrm;
+      expressionMapRef.current = loaded.expressionMap;
+      onExpressionMap?.(loaded.expressionMap);
+      if (vrm.lookAt) vrm.lookAt.target = lookAtTarget;
+      scene.add(vrm.scene);
+      setLoad({ phase: "ready", source: loaded.sourceUrl });
+    };
+
+    const beginLoad = (promise: Promise<LoadedVRM>) => {
+      const generation = ++loadGeneration;
+      setUploadError(null);
+      if (!vrm) setLoad({ phase: "loading" });
+      promise
+        .then((loaded) => {
+          if (disposed || generation !== loadGeneration) {
+            disposeVRM(loaded.vrm);
+            return;
+          }
+          adopt(loaded);
+        })
+        .catch((err: unknown) => {
+          if (disposed || generation !== loadGeneration) return;
+          const message = err instanceof Error ? err.message : String(err);
+          if (vrm) {
+            // A failed upload keeps the model that's already on stage.
+            setUploadError(`Could not load that VRM: ${message}`);
+          } else {
+            setLoad({
+              phase: "error",
+              message:
+                "Could not load a VRM model. Use “load VRM…” or drop one at " +
+                "public/models/avatar.vrm. " + message,
+            });
+          }
+        });
+    };
+
+    beginLoad(loadVRM());
+    loadFileRef.current = (file: File) => beginLoad(loadVRMFromFile(file));
 
     const clock = new THREE.Clock();
     renderer.setAnimationLoop(() => {
@@ -136,6 +164,7 @@ export function AvatarViewport({ frameRef, viewMode = "bust", onExpressionMap }:
 
     return () => {
       disposed = true;
+      loadFileRef.current = null;
       cameraRef.current = null;
       resizeObserver.disconnect();
       renderer.setAnimationLoop(null);
@@ -156,9 +185,24 @@ export function AvatarViewport({ frameRef, viewMode = "bust", onExpressionMap }:
       )}
       {load.phase === "ready" && load.source.startsWith("http") && (
         <div className="viewport-badge">
-          sample model — drop your own at public/models/avatar.vrm
+          sample model — use “load VRM…” to use your own
         </div>
       )}
+      <label className="btn viewport-upload">
+        load VRM…
+        <input
+          type="file"
+          accept=".vrm"
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) loadFileRef.current?.(file);
+            // Reset so picking the same file again re-triggers onChange.
+            e.target.value = "";
+          }}
+        />
+      </label>
+      {uploadError && <div className="viewport-upload-error">{uploadError}</div>}
     </div>
   );
 }

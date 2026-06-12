@@ -52,6 +52,22 @@ async function loadFrom(url: string): Promise<VRM> {
   return vrm;
 }
 
+function finishLoad(vrm: VRM, sourceUrl: string): LoadedVRM {
+  // Inspect what expressions/blendshapes this specific model exposes (VRM 1.0
+  // presets, VRM 0.x BlendShapeClips, "Perfect Sync" custom expressions) and
+  // build the mocap-channel -> model-expression map. Logged once so it's
+  // visible in the console for debugging; the unsupported list also surfaces
+  // in the debug HUD.
+  const expressionMap = buildExpressionMap(vrm);
+  console.info(
+    `[vrm] expression mapping: ${expressionMap.map.size}/${expressionMap.total} ` +
+      `mocap channels supported by this model.`,
+    { unsupported: expressionMap.unsupported },
+  );
+
+  return { vrm, sourceUrl, expressionMap };
+}
+
 /**
  * Try the local model first, then fall back to the hosted sample.
  */
@@ -71,19 +87,22 @@ export async function loadVRM(): Promise<LoadedVRM> {
     sourceUrl = FALLBACK_MODEL_URL;
   }
 
-  // Inspect what expressions/blendshapes this specific model exposes (VRM 1.0
-  // presets, VRM 0.x BlendShapeClips, "Perfect Sync" custom expressions) and
-  // build the mocap-channel -> model-expression map. Logged once so it's
-  // visible in the console for debugging; the unsupported list also surfaces
-  // in the debug HUD.
-  const expressionMap = buildExpressionMap(vrm);
-  console.info(
-    `[vrm] expression mapping: ${expressionMap.map.size}/${expressionMap.total} ` +
-      `mocap channels supported by this model.`,
-    { unsupported: expressionMap.unsupported },
-  );
+  return finishLoad(vrm, sourceUrl);
+}
 
-  return { vrm, sourceUrl, expressionMap };
+/**
+ * Load a user-supplied .vrm file (from a file picker / drag-and-drop).
+ * VRM files are self-contained glTF binaries, so a temporary object URL is
+ * all the loader needs.
+ */
+export async function loadVRMFromFile(file: File): Promise<LoadedVRM> {
+  const url = URL.createObjectURL(file);
+  try {
+    const vrm = await loadFrom(url);
+    return finishLoad(vrm, file.name);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 export function disposeVRM(vrm: VRM): void {
