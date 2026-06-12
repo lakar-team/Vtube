@@ -33,6 +33,27 @@ otherwise a hosted sample model is used.
 See [SETUP.md](./SETUP.md) for full setup, repo-push instructions, tuning
 notes, and known limitations.
 
+## Custom skins (Minecraft-style)
+
+The **skin** toolbar in the avatar pane re-paints the current model without
+changing its shape:
+
+1. **template ⤓** — downloads a PNG of the model's texture layout: one
+   labeled cell per base-color texture (face, body, hair, clothing, …), with
+   gridlines and the UV wireframe drawn on top so you can see what maps
+   where.
+2. Paint over the template in any image editor (keep the overall image
+   size/grid — each cell is sliced back out proportionally).
+3. **upload…** — applies your edited PNG to the live model.
+4. **sample** applies the bundled demo skin (`public/skins/sample-skin.png`,
+   the default avatar with hue-shifted hair/clothes — regenerate it with
+   `scripts/generate-sample-skin.mjs`); **reset** restores the original
+   textures.
+
+Skins apply to whichever VRM is currently loaded; the bundled sample is laid
+out for the default avatar, so it will look wrong on other models. Skins are
+texture-only by design — body-shape variants are a future milestone.
+
 ## Calibration (do this once per camera setup)
 
 1. **Calibrate face** — sit relaxed, look at the camera with a neutral face.
