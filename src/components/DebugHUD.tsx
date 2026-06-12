@@ -16,6 +16,9 @@ export interface DebugHUDProps {
 interface HudSample {
   rawHead: { x: number; y: number; z: number };
   smHead: { x: number; y: number; z: number };
+  rawSpinePitch: number;
+  smSpinePitch: number;
+  spineDebug: MocapFrame["spineDebug"];
   rawBlinkL: number;
   smBlinkL: number;
   rawAa: number;
@@ -23,6 +26,8 @@ interface HudSample {
   faceTracked: boolean;
   poseTracked: boolean;
   legsTracked: boolean;
+  leftArmTracked: boolean;
+  rightArmTracked: boolean;
   leftHandTracked: boolean;
   rightHandTracked: boolean;
 }
@@ -42,6 +47,9 @@ export function DebugHUD({ state, rawFrameRef, frameRef, expressionMap }: DebugH
       setSample({
         rawHead: raw.head,
         smHead: sm.head,
+        rawSpinePitch: raw.spine.x,
+        smSpinePitch: sm.spine.x,
+        spineDebug: raw.spineDebug,
         rawBlinkL: raw.expressions.blinkLeft,
         smBlinkL: sm.expressions.blinkLeft,
         rawAa: raw.expressions.aa,
@@ -49,6 +57,8 @@ export function DebugHUD({ state, rawFrameRef, frameRef, expressionMap }: DebugH
         faceTracked: raw.faceTracked,
         poseTracked: raw.poseTracked,
         legsTracked: raw.legsTracked,
+        leftArmTracked: raw.armsTracked.left,
+        rightArmTracked: raw.armsTracked.right,
         leftHandTracked: raw.hands.leftTracked,
         rightHandTracked: raw.hands.rightTracked,
       });
@@ -75,6 +85,16 @@ export function DebugHUD({ state, rawFrameRef, frameRef, expressionMap }: DebugH
         </strong>
       </div>
       <div className="hud-row">
+        <span>arms L/R</span>
+        <strong>
+          <span className={sample?.leftArmTracked ? "ok" : "bad"}>
+            {sample?.leftArmTracked ? "ok" : "—"}
+          </span>
+          {" / "}
+          <span className={sample?.rightArmTracked ? "ok" : "bad"}>
+            {sample?.rightArmTracked ? "ok" : "—"}
+          </span>
+        </strong>
         <span>left hand</span>
         <strong className={sample?.leftHandTracked ? "ok" : "bad"}>
           {sample?.leftHandTracked ? "tracked" : "lost"}
@@ -109,6 +129,24 @@ export function DebugHUD({ state, rawFrameRef, frameRef, expressionMap }: DebugH
                 {fmt(radToDeg(sample.smHead.z))}
               </td>
             </tr>
+            <tr>
+              <td>torso pitch / bow (deg)</td>
+              <td>{fmt(radToDeg(sample.rawSpinePitch))}</td>
+              <td>{fmt(radToDeg(sample.smSpinePitch))}</td>
+            </tr>
+            {sample.spineDebug && (
+              <tr>
+                <td>pitch est. z / size (deg)</td>
+                <td>
+                  {fmt(radToDeg(sample.spineDebug.worldPitch))} /{" "}
+                  {fmt(radToDeg(sample.spineDebug.sizePitch))}
+                </td>
+                <td>
+                  ratio {sample.spineDebug.ratio.toFixed(2)} / ref{" "}
+                  {sample.spineDebug.refRatio.toFixed(2)}
+                </td>
+              </tr>
+            )}
             <tr>
               <td>blink L</td>
               <td>{sample.rawBlinkL.toFixed(2)}</td>

@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import type { MutableRefObject } from "react";
 import type { DebugLandmarks } from "../mocap/types";
 
-/** Upper-body bone connections (MediaPipe pose indices). */
+/** Body bone connections (MediaPipe pose indices). */
 const POSE_CONNECTIONS: ReadonlyArray<readonly [number, number]> = [
   [11, 12], // shoulders
   [11, 13], // L shoulder -> elbow
@@ -12,6 +12,16 @@ const POSE_CONNECTIONS: ReadonlyArray<readonly [number, number]> = [
   [11, 23], // torso sides
   [12, 24],
   [23, 24], // hips
+  [23, 25], // L hip -> knee
+  [25, 27], // L knee -> ankle
+  [24, 26], // R hip -> knee
+  [26, 28], // R knee -> ankle
+  [27, 29], // L ankle -> heel
+  [29, 31], // L heel -> toe
+  [27, 31], // L ankle -> toe
+  [28, 30], // R ankle -> heel
+  [30, 32], // R heel -> toe
+  [28, 32], // R ankle -> toe
 ];
 
 /** Hand bone connections (MediaPipe hand landmark indices, 21 points). */
@@ -87,7 +97,10 @@ export function WebcamView({
           ctx.stroke();
         }
         ctx.fillStyle = "rgba(255, 121, 198, 0.95)";
-        for (let i = 0; i <= 16; i++) {
+        for (let i = 0; i < Math.min(pose.length, 33); i++) {
+          // 17-22 are the pose model's coarse hand points — the dedicated
+          // hand overlay covers those.
+          if (i >= 17 && i <= 22) continue;
           const p = pose[i];
           if (!p || (p.visibility ?? 1) < 0.5) continue;
           ctx.beginPath();

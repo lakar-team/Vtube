@@ -15,6 +15,7 @@ import {
   type FingerSegment,
   type HandRotations,
   type MocapFrame,
+  type TorsoPitchSource,
 } from "./types";
 import { clamp } from "../utils/math";
 
@@ -74,6 +75,28 @@ const LOWER_BODY_POSE_INDICES = [23, 24, 25, 26, 27, 28] as const; // hips/knees
 
 /** Min mean visibility of hips/knees/ankles before we trust leg solving. */
 const LEG_VISIBILITY_THRESHOLD = 0.6;
+
+/** Min mean visibility of one arm's shoulder/elbow/wrist to drive that arm. */
+const ARM_VISIBILITY_THRESHOLD = 0.55;
+
+/**
+ * Max image-space distance (in image-height units, aspect-corrected) between
+ * a detected hand's wrist and the nearest pose wrist before we distrust the
+ * geometric side match and fall back to the handedness label. A hand shoved
+ * at the lens can detach visually from its (occluded, hallucinated) pose arm.
+ */
+const HAND_ANCHOR_MAX_DIST = 0.35;
+
+/**
+ * When a hand's bounding-box diagonal exceeds this multiple of the shoulder
+ * width it is very close to the lens: the palm-plane wrist solve degrades
+ * badly there, so the wrist is dropped (eases back) while fingers — which
+ * Kalidokit solves scale-free — are kept.
+ */
+const HAND_SIZE_WRIST_LIMIT = 1.3;
+
+/** Absolute fallback for the same check when no pose is tracked. */
+const HAND_SIZE_ABS_LIMIT = 0.55;
 
 function mirrorEuler(e: EulerRotation): EulerRotation {
   // Mirroring about the vertical axis flips yaw and roll, keeps pitch.
@@ -178,6 +201,15 @@ export interface SolveOptions {
   mirror: boolean;
   /** Solve legs/hips from the lower-body landmarks when visible. */
   trackLegs: boolean;
+  /** Which torso-pitch (bow) estimator to use. */
+  torsoPitchSource: TorsoPitchSource;
+  /**
+   * Upright reference for the apparent-size pitch estimator: torso length /
+   * shoulder width while standing straight (from body calibration, or a
+   * running max maintained by useMocap). null = no reference yet, size
+   * estimator stays at 0.
+   */
+  refTorsoRatio: number | null;
   /** Timestamp in seconds. */
   t: number;
 }
@@ -192,7 +224,7 @@ export function solveMocapFrame(
   poseResult: PoseLandmarkerResult | null,
   handResult: HandLandmarkerResult | null,
   video: HTMLVideoElement,
-  { mirror, trackLegs, t }: SolveOptions,
+  { mirror, trackLegs, torsoPitchSource, refTorsoRatio, t }: SolveOptions,
 ): SolveResult {
   const frame = emptyFrame(t);
   const debug: DebugLandmarks = { face: null, pose: null, leftHand: null, rightHand: null };
@@ -318,19 +350,87 @@ export function solveMocapFrame(
       frame.poseTracked = true;
       // Kalidokit hard-zeroes Spine.x and Hips.rotation.x ("temp fix for
       // inaccurate X axis" in its calcHips), so a bow never reached the torso
-      // — only the head/neck bent. Recover torso pitch ourselves from the
-      // world-landmark hip->shoulder vector: world y grows downward and z
-      // shrinks toward the camera, so bowing forward drives dz negative.
-      // atan2(dz, -dy) is 0 upright and negative when bowing, matching the
-      // head.x convention (pitch down = negative) so the same per-model sign
-      // mapping applies downstream.
+      // — only the head/neck bent. We recover torso pitch ourselves, two ways:
+      //
+      // 1. "z" — geometric pitch of the world-landmark hip->shoulder vector.
+      //    World y grows downward and z shrinks toward the camera, so bowing
+      //    forward drives dz negative; atan2 is 0 upright and negative when
+      //    bowing, matching the head.x convention (pitch down = negative) so
+      //    the same per-model sign mapping applies downstream. |dy| is used
+      //    so a flipped y convention can't pin the angle at the clamp.
+      //    Weakness: monocular z is heavily compressed — deep bows underread.
+      //
+      // 2. "size" — image-space foreshortening: bowing shrinks the apparent
+      //    hip->shoulder distance while shoulder width stays constant, so
+      //    pitch ≈ acos(ratio / uprightRatio). Both lengths scale together
+      //    with camera distance, so stepping closer doesn't read as a bow.
+      //    Direction is borrowed from the z estimator (foreshortening alone
+      //    can't tell forward from backward). Torso yaw shrinks the shoulder
+      //    width, INFLATING the ratio — which clamps to 0 pitch, a safe
+      //    failure (no false bows while turned).
       const shoulderMid = midpoint3(poseWorld[11], poseWorld[12]);
       const hipMid = midpoint3(poseWorld[23], poseWorld[24]);
-      const torsoPitch = clamp(
-        Math.atan2(shoulderMid.z - hipMid.z, -(shoulderMid.y - hipMid.y)),
+      const worldPitch = clamp(
+        Math.atan2(
+          shoulderMid.z - hipMid.z,
+          Math.abs(shoulderMid.y - hipMid.y),
+        ),
         -1.6,
         1.6,
       );
+
+      // Image-space lengths in image-height units (x re-scaled by aspect so
+      // horizontal and vertical distances are commensurable).
+      const aspect = (video.videoWidth || 640) / (video.videoHeight || 480);
+      const dist2d = (
+        a: { x: number; y: number },
+        b: { x: number; y: number },
+      ) => Math.hypot((a.x - b.x) * aspect, a.y - b.y);
+      const shoulderWidth = dist2d(poseImage[11], poseImage[12]);
+      const torsoLen = dist2d(
+        midpoint3(poseImage[11], poseImage[12]),
+        midpoint3(poseImage[23], poseImage[24]),
+      );
+      frame.torsoRatio = shoulderWidth > 1e-4 ? torsoLen / shoulderWidth : 0;
+
+      let sizePitch = 0;
+      if (refTorsoRatio && refTorsoRatio > 0.2 && frame.torsoRatio > 0) {
+        let mag = Math.acos(clamp(frame.torsoRatio / refTorsoRatio, 0, 1));
+        // acos has infinite slope at 1, so resting jitter in the ratio reads
+        // as several degrees of pitch — squash small magnitudes (soft knee).
+        const KNEE = 0.25;
+        if (mag < KNEE) mag = (mag * mag) / KNEE;
+        sizePitch = clamp(worldPitch <= 0 ? -mag : mag, -1.4, 1.4);
+      }
+
+      const torsoPitch =
+        torsoPitchSource === "z"
+          ? worldPitch
+          : torsoPitchSource === "size"
+            ? sizePitch
+            : Math.abs(sizePitch) > Math.abs(worldPitch)
+              ? sizePitch
+              : worldPitch;
+
+      frame.spineDebug = {
+        worldPitch,
+        sizePitch,
+        ratio: frame.torsoRatio,
+        refRatio: refTorsoRatio ?? 0,
+      };
+
+      // Per-arm gating (see types.ts). Mirror convention: frame.arms.left*
+      // is solved from the subject's RIGHT arm landmarks (12/14/16) and
+      // vice versa, so the gates pair up the same way.
+      const armVis = (s: number, e: number, w: number) =>
+        ((poseImage[s]?.visibility ?? 0) +
+          (poseImage[e]?.visibility ?? 0) +
+          (poseImage[w]?.visibility ?? 0)) /
+        3;
+      frame.armsTracked = {
+        left: armVis(12, 14, 16) > ARM_VISIBILITY_THRESHOLD,
+        right: armVis(11, 13, 15) > ARM_VISIBILITY_THRESHOLD,
+      };
 
       frame.spine = {
         x: torsoPitch,
@@ -386,20 +486,24 @@ export function solveMocapFrame(
   const handedness = handResult?.handedness;
   if (handLm && handedness) {
     // Pose wrist anchors for geometric side matching (see header comment) —
-    // image space, same coordinates as the hand landmarks.
+    // image space, same coordinates as the hand landmarks. Each side is
+    // usable independently (one wrist can be occluded by its own hand).
+    const aspect = (video.videoWidth || 640) / (video.videoHeight || 480);
     const poseWristL = poseImage?.[15]; // subject's anatomical LEFT wrist
     const poseWristR = poseImage?.[16]; // subject's anatomical RIGHT wrist
-    const anchors =
-      frame.poseTracked &&
-      poseWristL != null &&
-      poseWristR != null &&
-      (poseWristL.visibility ?? 0) > 0.5 &&
-      (poseWristR.visibility ?? 0) > 0.5
-        ? { left: poseWristL, right: poseWristR }
-        : null;
+    const usable = (p: NormalizedLandmark | undefined) =>
+      frame.poseTracked && p != null && (p.visibility ?? 0) > 0.5 ? p : null;
+    const anchorL = usable(poseWristL);
+    const anchorR = usable(poseWristR);
 
     const dist = (a: NormalizedLandmark, b: NormalizedLandmark) =>
-      Math.hypot(a.x - b.x, a.y - b.y);
+      Math.hypot((a.x - b.x) * aspect, a.y - b.y);
+
+    // Shoulder width (image space) for the oversized-hand check.
+    const shoulderW =
+      frame.poseTracked && poseImage
+        ? dist(poseImage[11], poseImage[12])
+        : 0;
 
     const detected: Array<{
       lm: NormalizedLandmark[];
@@ -408,6 +512,8 @@ export function solveMocapFrame(
       labelLeft: boolean;
       dL: number;
       dR: number;
+      /** Geometric match is close enough to trust over the label. */
+      anchored: boolean;
     }> = [];
     for (let i = 0; i < handLm.length; i++) {
       const lm = handLm[i];
@@ -415,26 +521,29 @@ export function solveMocapFrame(
       const score = handedness[i]?.[0]?.score ?? 0;
       if (!lm || lm.length < 21) continue;
       if (label !== "Left" && label !== "Right") continue;
+      const dL = anchorL ? dist(lm[0], anchorL) : Number.POSITIVE_INFINITY;
+      const dR = anchorR ? dist(lm[0], anchorR) : Number.POSITIVE_INFINITY;
       detected.push({
         lm,
         score,
         labelLeft: label === "Left",
-        dL: anchors ? dist(lm[0], anchors.left) : Number.POSITIVE_INFINITY,
-        dR: anchors ? dist(lm[0], anchors.right) : Number.POSITIVE_INFINITY,
+        dL,
+        dR,
+        anchored: Math.min(dL, dR) <= HAND_ANCHOR_MAX_DIST,
       });
     }
 
-    // Which subject side is each hand? With two hands and a tracked pose,
-    // pick the joint assignment with the smaller total wrist distance so the
-    // two hands can never land on the same side.
+    // Which subject side is each hand? With two hands and both pose wrists
+    // trustworthy, pick the joint assignment with the smaller total wrist
+    // distance so the two hands can never land on the same side.
     let subjectLeft: boolean[];
-    if (anchors && detected.length === 2) {
+    if (detected.length === 2 && detected[0].anchored && detected[1].anchored) {
       subjectLeft =
         detected[0].dL + detected[1].dR <= detected[0].dR + detected[1].dL
           ? [true, false]
           : [false, true];
     } else {
-      subjectLeft = detected.map((h) => (anchors ? h.dL <= h.dR : h.labelLeft));
+      subjectLeft = detected.map((h) => (h.anchored ? h.dL <= h.dR : h.labelLeft));
     }
 
     for (let i = 0; i < detected.length; i++) {
@@ -443,10 +552,27 @@ export function solveMocapFrame(
       // the avatar's RIGHT side — the same side of the screen, matching the
       // pre-mirrored pose-solver arms.
       const avatarSide = subjectLeft[i] ? "Right" : "Left";
-      const { fingers, wrist } = solveHand(
+      const { fingers, wrist: solvedWrist } = solveHand(
         lm as unknown as KalidokitHandLandmarks,
         avatarSide,
       );
+
+      // Oversized hand = very close to the lens: the palm-plane wrist solve
+      // is noise there, so drop it (the rig eases the wrist back) but keep
+      // the fingers, which Kalidokit solves scale-free.
+      let minX = 1, minY = 1, maxX = 0, maxY = 0;
+      for (const p of lm) {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+      }
+      const handDiag = Math.hypot((maxX - minX) * aspect, maxY - minY);
+      const tooClose =
+        shoulderW > 1e-4
+          ? handDiag > shoulderW * HAND_SIZE_WRIST_LIMIT
+          : handDiag > HAND_SIZE_ABS_LIMIT;
+      const wrist = tooClose ? null : solvedWrist;
 
       if (avatarSide === "Left") {
         debug.leftHand = lm;
@@ -469,9 +595,15 @@ export function solveMocapFrame(
   // Kalidokit reference rig discards entirely in favour of the pose solver's
   // forearm-based value. Same here: pose z when tracked, neutral otherwise.
   // Pose "LeftHand" is the avatar-left side (subject's right hand), matching
-  // frame.hands.left — both pre-mirrored, so they pair directly.
-  if (frame.hands.leftWrist) frame.hands.leftWrist.z = poseHandZ?.left ?? 0;
-  if (frame.hands.rightWrist) frame.hands.rightWrist.z = poseHandZ?.right ?? 0;
+  // frame.hands.left — both pre-mirrored, so they pair directly. The pose z
+  // is only trusted while that arm's landmarks are visible (an occluded
+  // forearm produces hallucinated values).
+  if (frame.hands.leftWrist) {
+    frame.hands.leftWrist.z = frame.armsTracked.left ? poseHandZ?.left ?? 0 : 0;
+  }
+  if (frame.hands.rightWrist) {
+    frame.hands.rightWrist.z = frame.armsTracked.right ? poseHandZ?.right ?? 0 : 0;
+  }
 
   // -------------------------------------------------------------- mirror
   //
@@ -488,6 +620,10 @@ export function solveMocapFrame(
       leftLowerArm: mirrorEuler(frame.arms.rightLowerArm),
       rightUpperArm: mirrorEuler(frame.arms.leftUpperArm),
       rightLowerArm: mirrorEuler(frame.arms.leftLowerArm),
+    };
+    frame.armsTracked = {
+      left: frame.armsTracked.right,
+      right: frame.armsTracked.left,
     };
 
     frame.legs = {

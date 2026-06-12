@@ -8,6 +8,7 @@ import {
   type HandRotations,
   type MocapFrame,
 } from "./types";
+import { clamp } from "../utils/math";
 
 /**
  * Tunable smoothing parameters, grouped by signal type.
@@ -35,11 +36,28 @@ export const SMOOTHING_PARAMS = {
 };
 
 /**
+ * Max angular speed (rad/s) let through per channel, applied AFTER the One
+ * Euro filters. One Euro is built to let fast motion through (that's its
+ * selling point), which is exactly wrong for the single-frame spikes
+ * MediaPipe produces when a hand near the lens occludes its own arm — a
+ * 90°-in-one-frame arm snap is never real motion. The limits are high enough
+ * that genuine fast gestures (a full arm swing in ~a quarter second) pass
+ * untouched; only physically impossible jumps get spread over a few frames.
+ */
+export const SLEW_LIMITS = {
+  arm: 9,
+  wrist: 11,
+} as const;
+
+/**
  * A keyed bank of One Euro filters. Every scalar channel (head.x, blinkLeft,
  * leftUpperArm.z, ...) gets its own filter instance, created lazily.
+ * Also hosts the slew-limiter state (see SLEW_LIMITS) so one resetAll()
+ * clears both when calibration offsets jump.
  */
 export class FilterBank {
   private filters = new Map<string, OneEuroFilter>();
+  private slewPrev = new Map<string, { v: number; t: number }>();
 
   value(key: string, params: OneEuroParams, raw: number, t: number): number {
     let f = this.filters.get(key);
@@ -50,8 +68,26 @@ export class FilterBank {
     return f.filter(raw, t);
   }
 
+  /** Clamp the per-second rate of change of a channel. */
+  slew(key: string, v: number, t: number, maxRate: number): number {
+    const p = this.slewPrev.get(key);
+    let out = v;
+    if (p && t > p.t) {
+      const maxStep = maxRate * (t - p.t);
+      out = clamp(v, p.v - maxStep, p.v + maxStep);
+    }
+    if (p) {
+      p.v = out;
+      p.t = t;
+    } else {
+      this.slewPrev.set(key, { v: out, t });
+    }
+    return out;
+  }
+
   resetAll(): void {
     for (const f of this.filters.values()) f.reset();
+    this.slewPrev.clear();
   }
 }
 
@@ -123,13 +159,12 @@ export function smoothFrame(bank: FilterBank, frame: MocapFrame): MocapFrame {
   }
 
   for (const k of ARM_KEYS) {
-    out.arms[k] = smoothEuler(
-      bank,
-      `arm.${k}`,
-      frame.arms[k],
-      t,
-      SMOOTHING_PARAMS.rotation,
-    );
+    const e = smoothEuler(bank, `arm.${k}`, frame.arms[k], t, SMOOTHING_PARAMS.rotation);
+    out.arms[k] = {
+      x: bank.slew(`arm.${k}.x`, e.x, t, SLEW_LIMITS.arm),
+      y: bank.slew(`arm.${k}.y`, e.y, t, SLEW_LIMITS.arm),
+      z: bank.slew(`arm.${k}.z`, e.z, t, SLEW_LIMITS.arm),
+    };
   }
 
   for (const k of LEG_KEYS) {
@@ -145,11 +180,37 @@ export function smoothFrame(bank: FilterBank, frame: MocapFrame): MocapFrame {
   out.hands.left = smoothHand(bank, "left", frame.hands.left, t);
   out.hands.right = smoothHand(bank, "right", frame.hands.right, t);
   out.hands.leftWrist = frame.hands.leftWrist
-    ? smoothEuler(bank, "wrist.left", frame.hands.leftWrist, t, SMOOTHING_PARAMS.rotation)
+    ? slewEuler(
+        bank,
+        "wrist.left",
+        smoothEuler(bank, "wrist.left", frame.hands.leftWrist, t, SMOOTHING_PARAMS.rotation),
+        t,
+        SLEW_LIMITS.wrist,
+      )
     : null;
   out.hands.rightWrist = frame.hands.rightWrist
-    ? smoothEuler(bank, "wrist.right", frame.hands.rightWrist, t, SMOOTHING_PARAMS.rotation)
+    ? slewEuler(
+        bank,
+        "wrist.right",
+        smoothEuler(bank, "wrist.right", frame.hands.rightWrist, t, SMOOTHING_PARAMS.rotation),
+        t,
+        SLEW_LIMITS.wrist,
+      )
     : null;
 
   return out;
+}
+
+function slewEuler(
+  bank: FilterBank,
+  key: string,
+  e: EulerRotation,
+  t: number,
+  maxRate: number,
+): EulerRotation {
+  return {
+    x: bank.slew(`${key}.x`, e.x, t, maxRate),
+    y: bank.slew(`${key}.y`, e.y, t, maxRate),
+    z: bank.slew(`${key}.z`, e.z, t, maxRate),
+  };
 }

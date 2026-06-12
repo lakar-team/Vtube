@@ -7,6 +7,30 @@ export interface EulerRotation {
   z: number;
 }
 
+/**
+ * How torso pitch (bowing) is estimated — see kalidokitAdapter.
+ * - "z":      geometric pitch from MediaPipe's world-landmark depth. Direct,
+ *             but monocular z is heavily compressed so deep bows underread.
+ * - "size":   image-space foreshortening (apparent hip->shoulder distance vs
+ *             shoulder width — the classic apparent-size monocular depth cue).
+ *             Robust magnitude, needs an upright reference ratio.
+ * - "hybrid": whichever of the two reports the larger magnitude (default).
+ */
+export const TORSO_PITCH_SOURCES = ["hybrid", "size", "z"] as const;
+export type TorsoPitchSource = (typeof TORSO_PITCH_SOURCES)[number];
+
+/** Live internals of the torso-pitch estimators, for the debug HUD. */
+export interface SpinePitchDebug {
+  /** Pitch (rad) from the world-landmark z estimator. */
+  worldPitch: number;
+  /** Pitch (rad) from the apparent-size (foreshortening) estimator. */
+  sizePitch: number;
+  /** Measured torso length / shoulder width (image space). */
+  ratio: number;
+  /** Upright reference ratio in use (0 = none yet). */
+  refRatio: number;
+}
+
 /** VRM expression channels we drive (VRM 1.0 preset names). */
 export const EXPRESSION_KEYS = [
   "blinkLeft",
@@ -212,9 +236,23 @@ export interface MocapFrame {
   pupil: { x: number; y: number };
   expressions: ExpressionValues;
   arms: ArmRotations;
+  /**
+   * Per-arm landmark visibility gate (avatar frame, same sides as `arms`).
+   * A hand thrust at the lens occludes its own arm; the occluded side flails
+   * while the other arm is still perfectly tracked, so arms gate separately.
+   */
+  armsTracked: { left: boolean; right: boolean };
   legs: LegRotations;
   hips: HipsFrame;
   hands: HandsFrame;
+  /**
+   * Measured torso length / shoulder width in image space (0 when pose is
+   * untracked). Captured during body calibration as the upright reference
+   * for the apparent-size torso-pitch estimator.
+   */
+  torsoRatio: number;
+  /** Torso-pitch estimator internals for the HUD (null when pose untracked). */
+  spineDebug: SpinePitchDebug | null;
   confidence: { face: number; pose: number; legs: number; leftHand: number; rightHand: number };
 }
 
@@ -276,9 +314,12 @@ export function emptyFrame(t = 0): MocapFrame {
       rightUpperArm: zeroEuler(),
       rightLowerArm: zeroEuler(),
     },
+    armsTracked: { left: false, right: false },
     legs: zeroLegs(),
     hips: zeroHips(),
     hands: emptyHandsFrame(),
+    torsoRatio: 0,
+    spineDebug: null,
     confidence: { face: 0, pose: 0, legs: 0, leftHand: 0, rightHand: 0 },
   };
 }

@@ -102,17 +102,12 @@ export const HIPS_POS_LIMIT = { x: 0.5, y: 0.6, z: 0.6 } as const;
 export const GAZE_SWING = { x: 0.6, y: 0.35 } as const;
 
 /**
- * Relaxed arm pose used when pose tracking is unavailable: arms down at the
- * sides instead of the T-pose. Angles are in Kalidokit convention (left arm
- * drops with +z there) and go through the same per-model sign mapping as
- * live tracking.
+ * Relaxed upper-arm drop used when an arm (or the whole pose) is untracked:
+ * arms down at the sides instead of the T-pose. The angle is in Kalidokit
+ * convention (left arm drops with +z there) and goes through the same
+ * per-model sign mapping as live tracking. Lower arm relaxes to identity.
  */
-const RELAXED_ARM_EULERS: ReadonlyArray<[VRMHumanBoneName, EulerRotation]> = [
-  ["leftUpperArm", { x: 0, y: 0, z: 1.2 }],
-  ["rightUpperArm", { x: 0, y: 0, z: -1.2 }],
-  ["leftLowerArm", { x: 0, y: 0, z: 0 }],
-  ["rightLowerArm", { x: 0, y: 0, z: 0 }],
-];
+const RELAXED_UPPER_ARM_Z = { left: 1.2, right: -1.2 } as const;
 
 const LEG_BONES: VRMHumanBoneName[] = [
   "leftUpperLeg",
@@ -160,6 +155,19 @@ function easeBoneToward(
   const node = vrm.humanoid.getNormalizedBoneNode(bone);
   if (!node) return;
   node.quaternion.slerp(target, lerp);
+}
+
+/** Ease one arm toward the relaxed at-the-side pose. */
+function relaxArm(
+  vrm: VRM,
+  signs: RotationSigns,
+  side: "left" | "right",
+  lerp: number,
+): void {
+  _euler.set(0, 0, RELAXED_UPPER_ARM_Z[side] * signs.z, "XYZ");
+  _quat.setFromEuler(_euler);
+  easeBoneToward(vrm, `${side}UpperArm` as VRMHumanBoneName, _quat, lerp);
+  easeBoneToward(vrm, `${side}LowerArm` as VRMHumanBoneName, _identityQuat, lerp);
 }
 
 /**
@@ -230,18 +238,26 @@ export function applyMocapToVRM(
       rotateBone(vrm, signs, bone, _spineRot, RIG_LERP.body, weight / (chainWeight || 1));
     }
     rotateBone(vrm, signs, "hips", frame.hips.rotation, RIG_LERP.hips, HIPS_ROT_DAMP);
-    rotateBone(vrm, signs, "leftUpperArm", frame.arms.leftUpperArm, RIG_LERP.body);
-    rotateBone(vrm, signs, "leftLowerArm", frame.arms.leftLowerArm, RIG_LERP.body);
-    rotateBone(vrm, signs, "rightUpperArm", frame.arms.rightUpperArm, RIG_LERP.body);
-    rotateBone(vrm, signs, "rightLowerArm", frame.arms.rightLowerArm, RIG_LERP.body);
+    // Arms gate individually: a hand shoved at the lens occludes its own arm
+    // and MediaPipe hallucinates the hidden joints — that side eases to the
+    // relaxed pose while the visible arm keeps tracking.
+    if (frame.armsTracked.left) {
+      rotateBone(vrm, signs, "leftUpperArm", frame.arms.leftUpperArm, RIG_LERP.body);
+      rotateBone(vrm, signs, "leftLowerArm", frame.arms.leftLowerArm, RIG_LERP.body);
+    } else {
+      relaxArm(vrm, signs, "left", RIG_LERP.armRelaxReturn);
+    }
+    if (frame.armsTracked.right) {
+      rotateBone(vrm, signs, "rightUpperArm", frame.arms.rightUpperArm, RIG_LERP.body);
+      rotateBone(vrm, signs, "rightLowerArm", frame.arms.rightLowerArm, RIG_LERP.body);
+    } else {
+      relaxArm(vrm, signs, "right", RIG_LERP.armRelaxReturn);
+    }
   } else {
     // No pose: ease the arms down to a natural resting pose and straighten
     // the torso instead of freezing mid-bend.
-    for (const [bone, e] of RELAXED_ARM_EULERS) {
-      _euler.set(e.x * signs.x, e.y * signs.y, e.z * signs.z, "XYZ");
-      _quat.setFromEuler(_euler);
-      easeBoneToward(vrm, bone, _quat, RIG_LERP.armRelaxReturn);
-    }
+    relaxArm(vrm, signs, "left", RIG_LERP.armRelaxReturn);
+    relaxArm(vrm, signs, "right", RIG_LERP.armRelaxReturn);
     for (const [bone] of SPINE_CHAIN) {
       easeBoneToward(vrm, bone, _identityQuat, RIG_LERP.armRelaxReturn);
     }

@@ -53,6 +53,13 @@ export interface BodyCalibrationData {
   hipsRotation: EulerRotation;
   /** Reference standing hip position (solver units). */
   hipsPosition: { x: number; y: number; z: number };
+  /**
+   * Upright torso length / shoulder width (image space), the reference for
+   * the apparent-size torso-pitch (bow) estimator. 0 = not captured
+   * (pre-existing stored calibrations) — the estimator then falls back to a
+   * running max maintained by useMocap.
+   */
+  torsoRatio: number;
   legSamples: number;
   sampleCount: number;
 }
@@ -164,11 +171,18 @@ export class CalibrationRecorder {
       legs: zeroLegs(),
       hipsRotation: zeroEuler(),
       hipsPosition: { x: 0, y: 0, z: 0 },
+      torsoRatio: 0,
       legSamples: 0,
       sampleCount: n,
     };
 
+    let ratioSum = 0;
+    let ratioSamples = 0;
     for (const s of this.samples) {
+      if (s.torsoRatio > 0) {
+        ratioSum += s.torsoRatio;
+        ratioSamples++;
+      }
       body.spine.x += s.spine.x / n;
       body.spine.y += s.spine.y / n;
       body.spine.z += s.spine.z / n;
@@ -185,6 +199,7 @@ export class CalibrationRecorder {
       }
       if (s.legsTracked) body.legSamples++;
     }
+    if (ratioSamples > 5) body.torsoRatio = ratioSum / ratioSamples;
 
     // Legs are only zeroed against the T-pose if they were actually visible
     // during calibration; otherwise leave leg offsets at zero.
@@ -299,6 +314,11 @@ export function loadCalibration(): CalibrationData | null {
     // Minimal shape check: reject pre-v2 or corrupted payloads.
     if (typeof parsed !== "object" || parsed === null) return null;
     if (!parsed.head || !parsed.expressionBaseline) return null;
+    // Calibrations stored before the apparent-size bow estimator lack the
+    // torso ratio; 0 = "not captured" (falls back to the running max).
+    if (parsed.body && typeof parsed.body.torsoRatio !== "number") {
+      parsed.body.torsoRatio = 0;
+    }
     return { ...emptyCalibration(), ...parsed };
   } catch {
     return null;

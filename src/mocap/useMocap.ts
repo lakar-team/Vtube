@@ -17,7 +17,7 @@ import {
   type CalibrationData,
   type CalibrationMode,
 } from "./calibration";
-import type { DebugLandmarks, MocapFrame } from "./types";
+import type { DebugLandmarks, MocapFrame, TorsoPitchSource } from "./types";
 
 export type MocapStatus = "idle" | "loading" | "running" | "error";
 
@@ -84,7 +84,12 @@ const INITIAL_STATE: MocapState = {
  */
 export function useMocap(
   videoRef: RefObject<HTMLVideoElement | null>,
-  options: { mirror: boolean; trackLegs: boolean; enabled: boolean },
+  options: {
+    mirror: boolean;
+    trackLegs: boolean;
+    torsoPitchSource: TorsoPitchSource;
+    enabled: boolean;
+  },
 ): UseMocapResult {
   const frameRef = useRef<MocapFrame | null>(null);
   const rawFrameRef = useRef<MocapFrame | null>(null);
@@ -109,6 +114,15 @@ export function useMocap(
   mirrorRef.current = options.mirror;
   const trackLegsRef = useRef(options.trackLegs);
   trackLegsRef.current = options.trackLegs;
+  const torsoPitchSourceRef = useRef(options.torsoPitchSource);
+  torsoPitchSourceRef.current = options.torsoPitchSource;
+
+  // Fallback upright reference for the apparent-size bow estimator when no
+  // body calibration captured one: a slow-decaying running max of the
+  // measured torso ratio (a person spends most of their time upright, so the
+  // max is a decent stand-in for "standing straight"). The slight decay lets
+  // it recover if a too-large transient ever poisons it.
+  const runningRefRatioRef = useRef(0);
 
   const calibRef = useRef<CalibrationData | null>(null);
   const recorderRef = useRef<CalibrationRecorder | null>(null);
@@ -204,11 +218,23 @@ export function useMocap(
         return;
       }
 
+      const calibRatio = calibRef.current?.body?.torsoRatio ?? 0;
+      const runningRatio = runningRefRatioRef.current;
       const { frame: raw, debug } = solveMocapFrame(faceResult, poseResult, handResult, video, {
         mirror: mirrorRef.current,
         trackLegs: trackLegsRef.current,
+        torsoPitchSource: torsoPitchSourceRef.current,
+        refTorsoRatio:
+          calibRatio > 0 ? calibRatio : runningRatio > 0 ? runningRatio : null,
         t: nowMs / 1000,
       });
+
+      if (raw.poseTracked && raw.torsoRatio > 0) {
+        runningRefRatioRef.current = Math.max(
+          raw.torsoRatio,
+          runningRefRatioRef.current * (1 - 1e-4),
+        );
+      }
 
       rawFrameRef.current = raw;
       debugLandmarksRef.current = debug;
