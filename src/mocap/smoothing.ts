@@ -3,6 +3,7 @@ import {
   ALL_EXPRESSION_KEYS,
   ARM_KEYS,
   FINGER_SEGMENTS,
+  LEG_KEYS,
   type EulerRotation,
   type HandRotations,
   type MocapFrame,
@@ -28,6 +29,9 @@ export const SMOOTHING_PARAMS = {
   // Fingers move fast (taps, gestures) but webcam hand landmarks are noisy —
   // a touch snappier than body rotation smoothing.
   finger: { minCutoff: 1.2, beta: 0.7, dCutoff: 1.0 } satisfies OneEuroParams,
+  // Hip translation: heavy smoothing — it moves the whole model, so jitter
+  // here reads as the avatar vibrating on the spot.
+  hipsPosition: { minCutoff: 0.5, beta: 0.3, dCutoff: 1.0 } satisfies OneEuroParams,
 };
 
 /**
@@ -97,6 +101,15 @@ export function smoothFrame(bank: FilterBank, frame: MocapFrame): MocapFrame {
     },
     expressions: { ...frame.expressions },
     arms: { ...frame.arms },
+    legs: { ...frame.legs },
+    hips: {
+      rotation: smoothEuler(bank, "hips.rot", frame.hips.rotation, t, SMOOTHING_PARAMS.rotation),
+      position: {
+        x: bank.value("hips.pos.x", SMOOTHING_PARAMS.hipsPosition, frame.hips.position.x, t),
+        y: bank.value("hips.pos.y", SMOOTHING_PARAMS.hipsPosition, frame.hips.position.y, t),
+        z: bank.value("hips.pos.z", SMOOTHING_PARAMS.hipsPosition, frame.hips.position.z, t),
+      },
+    },
     hands: { ...frame.hands },
   };
 
@@ -119,8 +132,24 @@ export function smoothFrame(bank: FilterBank, frame: MocapFrame): MocapFrame {
     );
   }
 
+  for (const k of LEG_KEYS) {
+    out.legs[k] = smoothEuler(
+      bank,
+      `leg.${k}`,
+      frame.legs[k],
+      t,
+      SMOOTHING_PARAMS.rotation,
+    );
+  }
+
   out.hands.left = smoothHand(bank, "left", frame.hands.left, t);
   out.hands.right = smoothHand(bank, "right", frame.hands.right, t);
+  out.hands.leftWrist = frame.hands.leftWrist
+    ? smoothEuler(bank, "wrist.left", frame.hands.leftWrist, t, SMOOTHING_PARAMS.rotation)
+    : null;
+  out.hands.rightWrist = frame.hands.rightWrist
+    ? smoothEuler(bank, "wrist.right", frame.hands.rightWrist, t, SMOOTHING_PARAMS.rotation)
+    : null;
 
   return out;
 }

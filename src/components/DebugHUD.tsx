@@ -22,6 +22,7 @@ interface HudSample {
   smAa: number;
   faceTracked: boolean;
   poseTracked: boolean;
+  legsTracked: boolean;
   leftHandTracked: boolean;
   rightHandTracked: boolean;
 }
@@ -47,6 +48,7 @@ export function DebugHUD({ state, rawFrameRef, frameRef, expressionMap }: DebugH
         smAa: sm.expressions.aa,
         faceTracked: raw.faceTracked,
         poseTracked: raw.poseTracked,
+        legsTracked: raw.legsTracked,
         leftHandTracked: raw.hands.leftTracked,
         rightHandTracked: raw.hands.rightTracked,
       });
@@ -80,6 +82,10 @@ export function DebugHUD({ state, rawFrameRef, frameRef, expressionMap }: DebugH
         <span>right hand</span>
         <strong className={sample?.rightHandTracked ? "ok" : "bad"}>
           {sample?.rightHandTracked ? "tracked" : "lost"}
+        </strong>
+        <span>legs</span>
+        <strong className={sample?.legsTracked ? "ok" : "bad"}>
+          {sample?.legsTracked ? `tracked (${state.legsConfidence.toFixed(2)})` : "out of frame"}
         </strong>
       </div>
       {sample && (

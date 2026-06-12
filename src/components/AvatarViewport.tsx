@@ -7,9 +7,19 @@ import { applyMocapToVRM } from "../vrm/applyMocapToVRM";
 import type { ExpressionMapping } from "../vrm/expressionMap";
 import type { MocapFrame } from "../mocap/types";
 
+export type ViewMode = "bust" | "full";
+
+/** Camera placement per view mode (VRM humanoids stand at the origin). */
+const CAMERA_PRESETS: Record<ViewMode, { pos: [number, number, number]; look: [number, number, number] }> = {
+  bust: { pos: [0, 1.35, 1.6], look: [0, 1.32, 0] },
+  full: { pos: [0, 1.0, 4.2], look: [0, 0.9, 0] },
+};
+
 export interface AvatarViewportProps {
   /** Smoothed mocap output from useMocap. */
   frameRef: MutableRefObject<MocapFrame | null>;
+  /** Bust-up framing (face/hands detail) or full-body framing (legs). */
+  viewMode?: ViewMode;
   /** Called once the VRM loads with its blendshape support summary, for the
    *  debug HUD's "unsupported channels" warning. */
   onExpressionMap?: (mapping: ExpressionMapping) => void;
@@ -24,10 +34,20 @@ type LoadState =
  * Three.js viewport: renders the VRM and applies the latest mocap frame on
  * every render tick.
  */
-export function AvatarViewport({ frameRef, onExpressionMap }: AvatarViewportProps) {
+export function AvatarViewport({ frameRef, viewMode = "bust", onExpressionMap }: AvatarViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [load, setLoad] = useState<LoadState>({ phase: "loading" });
   const expressionMapRef = useRef<ExpressionMapping | undefined>(undefined);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+
+  // Reframe the existing camera when the view mode changes.
+  useEffect(() => {
+    const camera = cameraRef.current;
+    if (!camera) return;
+    const preset = CAMERA_PRESETS[viewMode];
+    camera.position.set(...preset.pos);
+    camera.lookAt(...preset.look);
+  }, [viewMode]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -48,10 +68,11 @@ export function AvatarViewport({ frameRef, onExpressionMap }: AvatarViewportProp
       0.1,
       30,
     );
-    // Bust-up framing: VRM humanoids stand at the origin, head ~1.3-1.5 m.
-    camera.position.set(0, 1.35, 1.6);
-    camera.lookAt(0, 1.32, 0);
+    const preset = CAMERA_PRESETS[viewMode];
+    camera.position.set(...preset.pos);
+    camera.lookAt(...preset.look);
     scene.add(camera);
+    cameraRef.current = camera;
 
     // Gaze target for the VRM lookAt applier, parented to the camera so
     // "looking at the viewer" is the neutral state.
@@ -115,6 +136,7 @@ export function AvatarViewport({ frameRef, onExpressionMap }: AvatarViewportProp
 
     return () => {
       disposed = true;
+      cameraRef.current = null;
       resizeObserver.disconnect();
       renderer.setAnimationLoop(null);
       if (vrm) disposeVRM(vrm);

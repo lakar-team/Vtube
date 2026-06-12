@@ -11,7 +11,11 @@ import { FilterBank, smoothFrame } from "./smoothing";
 import {
   applyCalibration,
   CalibrationRecorder,
+  clearStoredCalibration,
+  loadCalibration,
+  saveCalibration,
   type CalibrationData,
+  type CalibrationMode,
 } from "./calibration";
 import type { DebugLandmarks, MocapFrame } from "./types";
 
@@ -23,8 +27,13 @@ export interface MocapState {
   fps: number;
   faceConfidence: number;
   poseConfidence: number;
-  calibrating: boolean;
-  calibrated: boolean;
+  legsConfidence: number;
+  /** Which calibration is currently capturing, if any. */
+  calibrating: CalibrationMode | null;
+  /** Seconds left in the pre-capture countdown (body mode), 0 when capturing. */
+  calibrationCountdown: number;
+  faceCalibrated: boolean;
+  bodyCalibrated: boolean;
 }
 
 export interface UseMocapResult {
@@ -35,8 +44,14 @@ export interface UseMocapResult {
   /** Latest landmark arrays for the webcam debug overlay. */
   debugLandmarksRef: MutableRefObject<DebugLandmarks>;
   state: MocapState;
-  /** Start a ~2 s neutral-pose calibration capture. */
-  calibrate: () => void;
+  /**
+   * Start a calibration capture.
+   * - "face": ~2 s neutral-expression capture (sit relaxed, look at camera).
+   * - "body": 3 s countdown, then ~2 s T-pose capture (stand, arms straight
+   *   out to the sides) — zeroes the body solve against the model's rest
+   *   pose and sets the hip-translation reference.
+   */
+  calibrate: (mode: CalibrationMode) => void;
   clearCalibration: () => void;
 }
 
@@ -46,16 +61,19 @@ const INITIAL_STATE: MocapState = {
   fps: 0,
   faceConfidence: 0,
   poseConfidence: 0,
-  calibrating: false,
-  calibrated: false,
+  legsConfidence: 0,
+  calibrating: null,
+  calibrationCountdown: 0,
+  faceCalibrated: false,
+  bodyCalibrated: false,
 };
 
 /**
  * The unified mocap pipeline:
  *
  *   webcam video
- *     -> MediaPipe FaceLandmarker + PoseLandmarker (detectForVideo)
- *     -> Kalidokit Face/Pose solve (kalidokitAdapter)
+ *     -> MediaPipe FaceLandmarker + PoseLandmarker + HandLandmarker
+ *     -> Kalidokit Face/Pose/Hand solve (kalidokitAdapter)
  *     -> calibration offsets (calibration.ts)
  *     -> One Euro filter bank (smoothing.ts)
  *     -> frameRef (consumed by AvatarViewport each render frame)
@@ -66,7 +84,7 @@ const INITIAL_STATE: MocapState = {
  */
 export function useMocap(
   videoRef: RefObject<HTMLVideoElement | null>,
-  options: { mirror: boolean; enabled: boolean },
+  options: { mirror: boolean; trackLegs: boolean; enabled: boolean },
 ): UseMocapResult {
   const frameRef = useRef<MocapFrame | null>(null);
   const rawFrameRef = useRef<MocapFrame | null>(null);
@@ -77,26 +95,51 @@ export function useMocap(
     rightHand: null,
   });
 
-  const [state, setState] = useState<MocapState>(INITIAL_STATE);
+  const [state, setState] = useState<MocapState>(() => {
+    const stored = loadCalibration();
+    return {
+      ...INITIAL_STATE,
+      faceCalibrated: (stored?.faceSampleCount ?? 0) > 0,
+      bodyCalibrated: stored?.body != null,
+    };
+  });
 
   // Refs for values the detection loop reads without re-subscribing.
   const mirrorRef = useRef(options.mirror);
   mirrorRef.current = options.mirror;
+  const trackLegsRef = useRef(options.trackLegs);
+  trackLegsRef.current = options.trackLegs;
 
   const calibRef = useRef<CalibrationData | null>(null);
   const recorderRef = useRef<CalibrationRecorder | null>(null);
   const bankRef = useRef<FilterBank>(new FilterBank());
 
-  const calibrate = useCallback(() => {
-    recorderRef.current = new CalibrationRecorder(performance.now());
-    setState((s) => ({ ...s, calibrating: true }));
+  // Restore last session's calibration (camera setups rarely move).
+  useEffect(() => {
+    calibRef.current = loadCalibration();
+  }, []);
+
+  const calibrate = useCallback((mode: CalibrationMode) => {
+    recorderRef.current = new CalibrationRecorder(mode, performance.now());
+    setState((s) => ({
+      ...s,
+      calibrating: mode,
+      calibrationCountdown: mode === "body" ? 3 : 0,
+    }));
   }, []);
 
   const clearCalibration = useCallback(() => {
     calibRef.current = null;
     recorderRef.current = null;
     bankRef.current.resetAll();
-    setState((s) => ({ ...s, calibrating: false, calibrated: false }));
+    clearStoredCalibration();
+    setState((s) => ({
+      ...s,
+      calibrating: null,
+      calibrationCountdown: 0,
+      faceCalibrated: false,
+      bodyCalibrated: false,
+    }));
   }, []);
 
   useEffect(() => {
@@ -109,6 +152,7 @@ export function useMocap(
     let frameCount = 0;
     let fpsWindowStart = performance.now();
     let fps = 0;
+    let lastShownCountdown = -1;
 
     setState((s) => ({ ...s, status: "loading", error: null }));
 
@@ -162,6 +206,7 @@ export function useMocap(
 
       const { frame: raw, debug } = solveMocapFrame(faceResult, poseResult, handResult, video, {
         mirror: mirrorRef.current,
+        trackLegs: trackLegsRef.current,
         t: nowMs / 1000,
       });
 
@@ -172,14 +217,30 @@ export function useMocap(
       const recorder = recorderRef.current;
       if (recorder) {
         const stillRecording = recorder.add(raw, nowMs);
+
+        // Surface the body-mode countdown at 1 Hz granularity.
+        const countdown = Math.ceil(recorder.countdownLeft(nowMs));
+        if (countdown !== lastShownCountdown) {
+          lastShownCountdown = countdown;
+          setState((s) => ({ ...s, calibrationCountdown: countdown }));
+        }
+
         if (!stillRecording) {
-          const data = recorder.finish();
+          const data = recorder.finish(calibRef.current);
           recorderRef.current = null;
+          lastShownCountdown = -1;
           if (data) {
             calibRef.current = data;
+            saveCalibration(data);
             bankRef.current.resetAll(); // offsets jumped; don't smooth across it
           }
-          setState((s) => ({ ...s, calibrating: false, calibrated: data !== null }));
+          setState((s) => ({
+            ...s,
+            calibrating: null,
+            calibrationCountdown: 0,
+            faceCalibrated: (calibRef.current?.faceSampleCount ?? 0) > 0,
+            bodyCalibrated: calibRef.current?.body != null,
+          }));
         }
       }
 
@@ -198,6 +259,7 @@ export function useMocap(
           fps: Math.round(fps),
           faceConfidence: raw.confidence.face,
           poseConfidence: raw.confidence.pose,
+          legsConfidence: raw.confidence.legs,
         }));
       }
     }

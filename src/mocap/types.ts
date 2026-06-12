@@ -134,6 +134,14 @@ export type HandRotations = Partial<Record<FingerSegment, EulerRotation>>;
 export interface HandsFrame {
   left: HandRotations | null;
   right: HandRotations | null;
+  /**
+   * Wrist (VRM `leftHand`/`rightHand` bone) rotations. Solved from the hand
+   * landmarks (Kalidokit `Hand.solve` -> `${side}Wrist`), with the up/down
+   * component reinforced by the pose solver's `LeftHand`/`RightHand` output
+   * when the pose is tracked.
+   */
+  leftWrist: EulerRotation | null;
+  rightWrist: EulerRotation | null;
   leftTracked: boolean;
   rightTracked: boolean;
 }
@@ -154,6 +162,38 @@ export const ARM_KEYS = [
 
 export type ArmKey = (typeof ARM_KEYS)[number];
 
+export interface LegRotations {
+  leftUpperLeg: EulerRotation;
+  leftLowerLeg: EulerRotation;
+  rightUpperLeg: EulerRotation;
+  rightLowerLeg: EulerRotation;
+}
+
+export const LEG_KEYS = [
+  "leftUpperLeg",
+  "leftLowerLeg",
+  "rightUpperLeg",
+  "rightLowerLeg",
+] as const;
+
+export type LegKey = (typeof LEG_KEYS)[number];
+
+/**
+ * Hips solve output.
+ * - rotation: hip yaw/roll from the 3D hip line (radians, Kalidokit space).
+ * - position: rough hip translation in solver space. x = lateral offset from
+ *   image center, y = vertical offset (our own estimate from the image-space
+ *   hip height; Kalidokit leaves y at 0), z = depth proxy derived from the
+ *   apparent spine length (closer to camera = longer spine = larger z).
+ *   These are RELATIVE units, only meaningful against a calibrated reference
+ *   (see calibration.ts body calibration); the rig layer applies
+ *   (position - reference) * scale to the hips bone.
+ */
+export interface HipsFrame {
+  rotation: EulerRotation;
+  position: { x: number; y: number; z: number };
+}
+
 /**
  * One fully-solved mocap frame, in VRM-ready units:
  * - rotations: radians, Kalidokit conventions (sign-mapped onto bones later)
@@ -165,13 +205,17 @@ export interface MocapFrame {
   t: number;
   faceTracked: boolean;
   poseTracked: boolean;
+  /** Lower body (hips/knees/ankles) visible enough to drive legs. */
+  legsTracked: boolean;
   head: EulerRotation;
   spine: EulerRotation;
   pupil: { x: number; y: number };
   expressions: ExpressionValues;
   arms: ArmRotations;
+  legs: LegRotations;
+  hips: HipsFrame;
   hands: HandsFrame;
-  confidence: { face: number; pose: number; leftHand: number; rightHand: number };
+  confidence: { face: number; pose: number; legs: number; leftHand: number; rightHand: number };
 }
 
 /** Raw landmark arrays kept around for the debug overlay. */
@@ -193,7 +237,27 @@ export function zeroExpressions(): ExpressionValues {
 }
 
 export function emptyHandsFrame(): HandsFrame {
-  return { left: null, right: null, leftTracked: false, rightTracked: false };
+  return {
+    left: null,
+    right: null,
+    leftWrist: null,
+    rightWrist: null,
+    leftTracked: false,
+    rightTracked: false,
+  };
+}
+
+export function zeroLegs(): LegRotations {
+  return {
+    leftUpperLeg: zeroEuler(),
+    leftLowerLeg: zeroEuler(),
+    rightUpperLeg: zeroEuler(),
+    rightLowerLeg: zeroEuler(),
+  };
+}
+
+export function zeroHips(): HipsFrame {
+  return { rotation: zeroEuler(), position: { x: 0, y: 0, z: 0 } };
 }
 
 export function emptyFrame(t = 0): MocapFrame {
@@ -201,6 +265,7 @@ export function emptyFrame(t = 0): MocapFrame {
     t,
     faceTracked: false,
     poseTracked: false,
+    legsTracked: false,
     head: zeroEuler(),
     spine: zeroEuler(),
     pupil: { x: 0, y: 0 },
@@ -211,7 +276,9 @@ export function emptyFrame(t = 0): MocapFrame {
       rightUpperArm: zeroEuler(),
       rightLowerArm: zeroEuler(),
     },
+    legs: zeroLegs(),
+    hips: zeroHips(),
     hands: emptyHandsFrame(),
-    confidence: { face: 0, pose: 0, leftHand: 0, rightHand: 0 },
+    confidence: { face: 0, pose: 0, legs: 0, leftHand: 0, rightHand: 0 },
   };
 }

@@ -34,12 +34,38 @@ import { clamp } from "../utils/math";
  *   - poseResult.landmarks[0]      -> 33 normalized {x,y,z,visibility}.
  * Kalidokit's TypeScript types are stricter than its runtime needs, hence
  * the casts below.
+ *
+ * SIDE / MIRROR CONVENTION (important — verified against Kalidokit source):
+ * Kalidokit's solvers are "pre-mirrored": their output is meant to be applied
+ * DIRECTLY to the avatar for mirror behaviour (avatar acts as your
+ * reflection). Proof from kalidokit/dist/PoseSolver/calcArms.js: its
+ * `UpperArm.r` is computed from landmarks 11/13 — MediaPipe's LEFT shoulder/
+ * elbow. The subject's left arm drives the rig's RIGHT arm, i.e. the on-screen
+ * mirror side. Legs are the same (calcLegs uses 23/25 for the "right" leg).
+ * MediaPipe's hand `handedness` labels behave identically: they assume a
+ * mirrored selfie image, so on our unmirrored video a label of "Left" is the
+ * subject's anatomical RIGHT hand — which is exactly the avatar's left hand
+ * in mirror mode.
+ *
+ * So: with `mirror: true` (the default VTuber UX) every Kalidokit/handedness
+ * output is used AS-IS. With `mirror: false` we swap left/right pairs and
+ * mirror each euler (flip yaw/roll). Earlier revisions had this backwards for
+ * the body (swapped when mirroring), which un-mirrored arms/hands relative to
+ * the face and made tracked movement look inverted.
+ *
+ * The 52 MediaPipe blendshapes are the exception: their names are in the
+ * SUBJECT's anatomical frame (eyeBlinkLeft = your left eye), so they swap on
+ * `mirror: true` instead.
  */
 
 type KalidokitLandmarks = Parameters<typeof Face.solve>[0];
 type KalidokitHandLandmarks = Parameters<typeof Hand.solve>[0];
 
 const UPPER_BODY_POSE_INDICES = [11, 12, 13, 14, 15, 16] as const; // shoulders/elbows/wrists
+const LOWER_BODY_POSE_INDICES = [23, 24, 25, 26, 27, 28] as const; // hips/knees/ankles
+
+/** Min mean visibility of hips/knees/ankles before we trust leg solving. */
+const LEG_VISIBILITY_THRESHOLD = 0.6;
 
 function mirrorEuler(e: EulerRotation): EulerRotation {
   // Mirroring about the vertical axis flips yaw and roll, keeps pitch.
@@ -71,28 +97,38 @@ const FINGER_KALIDOKIT_SUFFIX: Record<FingerSegment, string> = {
   littleDistal: "LittleDistal",
 };
 
+interface SolvedHand {
+  fingers: HandRotations;
+  wrist: EulerRotation | null;
+}
+
 /**
  * Solve one hand's 21 landmarks via Kalidokit and remap onto VRM finger-bone
- * segment names. `side` is whatever label MediaPipe assigned ("Left" |
- * "Right") — mirroring (if any) is applied afterwards by the caller.
+ * segment names plus the wrist. `side` is the avatar-side label from
+ * MediaPipe handedness ("Left" | "Right") — un-mirroring (if any) is applied
+ * afterwards by the caller.
  */
 function solveHand(
   landmarks: KalidokitHandLandmarks,
   side: "Left" | "Right",
-): HandRotations {
+): SolvedHand {
   const rigged = Hand.solve(landmarks, side) as unknown as Record<
     string,
     EulerRotation | undefined
   > | null;
 
-  const out: HandRotations = {};
+  const out: SolvedHand = { fingers: {}, wrist: null };
   if (!rigged) return out;
 
   for (const segment of Object.keys(FINGER_KALIDOKIT_SUFFIX) as FingerSegment[]) {
     const key = `${side}${FINGER_KALIDOKIT_SUFFIX[segment]}`;
     const rot = rigged[key];
-    if (rot) out[segment] = { x: rot.x, y: rot.y, z: rot.z };
+    if (rot) out.fingers[segment] = { x: rot.x, y: rot.y, z: rot.z };
   }
+
+  const wrist = rigged[`${side}Wrist`];
+  if (wrist) out.wrist = { x: wrist.x, y: wrist.y, z: wrist.z };
+
   return out;
 }
 
@@ -125,6 +161,8 @@ function mirrorExpressions(expr: MocapFrame["expressions"]): void {
 export interface SolveOptions {
   /** Mirror mode: avatar behaves like your reflection (default UX). */
   mirror: boolean;
+  /** Solve legs/hips from the lower-body landmarks when visible. */
+  trackLegs: boolean;
   /** Timestamp in seconds. */
   t: number;
 }
@@ -139,10 +177,16 @@ export function solveMocapFrame(
   poseResult: PoseLandmarkerResult | null,
   handResult: HandLandmarkerResult | null,
   video: HTMLVideoElement,
-  { mirror, t }: SolveOptions,
+  { mirror, trackLegs, t }: SolveOptions,
 ): SolveResult {
   const frame = emptyFrame(t);
   const debug: DebugLandmarks = { face: null, pose: null, leftHand: null, rightHand: null };
+
+  // Wrist up/down (z) from the pose solver — it sees the whole forearm so
+  // it's steadier than the hand solver's palm-plane estimate. Captured in the
+  // pose section, blended into the wrists after the hand section (the same
+  // split the Kalidokit reference rig uses).
+  let poseHandZ: { left: number; right: number } | null = null;
 
   // ---------------------------------------------------------------- face
   const faceLm = faceResult?.faceLandmarks?.[0];
@@ -234,15 +278,24 @@ export function solveMocapFrame(
     }
     frame.confidence.pose = vis / UPPER_BODY_POSE_INDICES.length;
 
+    // Separate confidence for the lower body: a seated webcam user has
+    // perfectly good arm tracking while hips/knees are out of frame.
+    let legVis = 0;
+    for (const i of LOWER_BODY_POSE_INDICES) {
+      legVis += poseImage[i]?.visibility ?? 0;
+    }
+    frame.confidence.legs = legVis / LOWER_BODY_POSE_INDICES.length;
+    const legsVisible = trackLegs && frame.confidence.legs > LEG_VISIBILITY_THRESHOLD;
+
     const riggedPose = Pose.solve(
       poseWorld as unknown as Parameters<typeof Pose.solve>[0],
       poseImage as unknown as Parameters<typeof Pose.solve>[1],
       {
         runtime: "mediapipe",
         video,
-        // Webcam VTubing is seated/upper-body; leg solving from a desk
-        // camera produces garbage, so keep it off.
-        enableLegs: false,
+        // Leg solving from a desk camera produces garbage, so it's gated on
+        // lower-body visibility (and the user's toggle).
+        enableLegs: legsVisible,
       },
     );
 
@@ -259,6 +312,41 @@ export function solveMocapFrame(
         rightUpperArm: { ...riggedPose.RightUpperArm },
         rightLowerArm: { ...riggedPose.RightLowerArm },
       };
+
+      // Hips: rotation from the 3D hip line; position is a rough translation
+      // estimate — x from where the hips sit in the image, z from the
+      // apparent spine length (Kalidokit's depth proxy: walking toward the
+      // camera grows the spine in image space). We add our own y from the
+      // image-space hip height so crouches/jumps translate the avatar.
+      // All of it is relative — the rig layer only applies it against a
+      // body-calibrated reference position.
+      poseHandZ = {
+        left: riggedPose.LeftHand.z,
+        right: riggedPose.RightHand.z,
+      };
+
+      const hipsRot = riggedPose.Hips.rotation ?? zeroEuler();
+      const hipCenterY =
+        ((poseImage[23]?.y ?? 0.5) + (poseImage[24]?.y ?? 0.5)) / 2;
+      frame.hips = {
+        rotation: { x: hipsRot.x, y: hipsRot.y, z: hipsRot.z },
+        position: {
+          x: riggedPose.Hips.position.x,
+          // Image y grows downward; flip so "up" is positive.
+          y: -(hipCenterY - 0.5),
+          z: riggedPose.Hips.position.z,
+        },
+      };
+
+      if (legsVisible) {
+        frame.legsTracked = true;
+        frame.legs = {
+          leftUpperLeg: { ...riggedPose.LeftUpperLeg },
+          leftLowerLeg: { ...riggedPose.LeftLowerLeg },
+          rightUpperLeg: { ...riggedPose.RightUpperLeg },
+          rightLowerLeg: { ...riggedPose.RightLowerLeg },
+        };
+      }
     }
   }
 
@@ -273,29 +361,40 @@ export function solveMocapFrame(
       if (!lm || lm.length < 21) continue;
       if (label !== "Left" && label !== "Right") continue;
 
-      const rotations = solveHand(lm as unknown as KalidokitHandLandmarks, label);
+      const { fingers, wrist } = solveHand(lm as unknown as KalidokitHandLandmarks, label);
 
       if (label === "Left") {
         debug.leftHand = lm;
-        frame.hands.left = rotations;
+        frame.hands.left = fingers;
+        frame.hands.leftWrist = wrist;
         frame.hands.leftTracked = true;
         frame.confidence.leftHand = score;
       } else {
         debug.rightHand = lm;
-        frame.hands.right = rotations;
+        frame.hands.right = fingers;
+        frame.hands.rightWrist = wrist;
         frame.hands.rightTracked = true;
         frame.confidence.rightHand = score;
       }
     }
   }
 
+  // Pose LeftHand pairs with handedness label "Left": both are the mirror
+  // side computed from the same physical hand, so they combine directly.
+  if (poseHandZ) {
+    if (frame.hands.leftWrist) frame.hands.leftWrist.z = poseHandZ.left;
+    if (frame.hands.rightWrist) frame.hands.rightWrist.z = poseHandZ.right;
+  }
+
   // -------------------------------------------------------------- mirror
-  if (mirror) {
+  //
+  // Kalidokit pose/hand/face output and MediaPipe handedness labels are
+  // already in mirror convention (see header comment). mirror === true means
+  // "use as-is". mirror === false un-mirrors: swap every left/right pair and
+  // flip yaw/roll on every rotation.
+  if (!mirror) {
     frame.head = mirrorEuler(frame.head);
     frame.spine = mirrorEuler(frame.spine);
-    frame.pupil = { x: -frame.pupil.x, y: frame.pupil.y };
-
-    mirrorExpressions(frame.expressions);
 
     frame.arms = {
       leftUpperArm: mirrorEuler(frame.arms.rightUpperArm),
@@ -304,10 +403,28 @@ export function solveMocapFrame(
       rightLowerArm: mirrorEuler(frame.arms.leftLowerArm),
     };
 
-    const { left, right, leftTracked, rightTracked } = frame.hands;
+    frame.legs = {
+      leftUpperLeg: mirrorEuler(frame.legs.rightUpperLeg),
+      leftLowerLeg: mirrorEuler(frame.legs.rightLowerLeg),
+      rightUpperLeg: mirrorEuler(frame.legs.leftUpperLeg),
+      rightLowerLeg: mirrorEuler(frame.legs.leftLowerLeg),
+    };
+
+    frame.hips = {
+      rotation: mirrorEuler(frame.hips.rotation),
+      position: {
+        x: -frame.hips.position.x,
+        y: frame.hips.position.y,
+        z: frame.hips.position.z,
+      },
+    };
+
+    const { left, right, leftWrist, rightWrist, leftTracked, rightTracked } = frame.hands;
     frame.hands = {
       left: right ? mirrorHand(right) : null,
       right: left ? mirrorHand(left) : null,
+      leftWrist: rightWrist ? mirrorEuler(rightWrist) : null,
+      rightWrist: leftWrist ? mirrorEuler(leftWrist) : null,
       leftTracked: rightTracked,
       rightTracked: leftTracked,
     };
@@ -317,10 +434,16 @@ export function solveMocapFrame(
     const { leftHand: dbgL, rightHand: dbgR } = debug;
     debug.leftHand = dbgR;
     debug.rightHand = dbgL;
+  } else {
+    // MediaPipe blendshape names are subject-frame, so mirror mode is the
+    // case that swaps them. Pupil x drives a camera-space gaze target (not a
+    // bone), so its mirror flip is independent of the convention above.
+    mirrorExpressions(frame.expressions);
+    frame.pupil = { x: -frame.pupil.x, y: frame.pupil.y };
   }
 
-  // When pose is lost, keep arms at zero (the rig layer eases toward a
-  // relaxed pose instead of freezing mid-air).
+  // When pose is lost, keep body channels at zero (the rig layer eases
+  // toward a relaxed pose instead of freezing mid-air).
   if (!frame.poseTracked) {
     frame.spine = zeroEuler();
   }

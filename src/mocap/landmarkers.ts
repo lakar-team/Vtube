@@ -27,10 +27,12 @@ const WASM_BASE =
 const FACE_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
 
-// "lite" pose model: best latency for an upper-body webcam use case.
-// Swap to pose_landmarker_full for a bit more accuracy at higher cost.
+// "full" pose model: noticeably better 3D (z) accuracy than "lite", which
+// matters for full-body tracking and for telling whether a hand is in front
+// of or behind the torso (dance moves). Costs a few ms more per frame; swap
+// back to pose_landmarker_lite if a low-end machine can't hold frame rate.
 const POSE_MODEL_URL =
-  "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
+  "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task";
 
 // HandLandmarker: 21 landmarks per hand, up to 2 hands. Used for finger
 // rigging via Kalidokit's Hand solver.

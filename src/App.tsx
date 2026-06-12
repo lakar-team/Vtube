@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { WebcamView } from "./components/WebcamView";
-import { AvatarViewport } from "./components/AvatarViewport";
+import { AvatarViewport, type ViewMode } from "./components/AvatarViewport";
 import { CalibrationPanel } from "./components/CalibrationPanel";
 import { DebugHUD } from "./components/DebugHUD";
 import { useWebcam } from "./hooks/useWebcam";
@@ -12,16 +12,18 @@ export default function App() {
 
   const [mirror, setMirror] = useState(true);
   const [showOverlay, setShowOverlay] = useState(true);
+  const [trackLegs, setTrackLegs] = useState(true);
+  const [viewMode, setViewMode] = useState<ViewMode>("full");
   const [expressionMap, setExpressionMap] = useState<ExpressionMapping | null>(null);
 
   const webcam = useWebcam(videoRef);
-  const mocap = useMocap(videoRef, { mirror, enabled: webcam.ready });
+  const mocap = useMocap(videoRef, { mirror, trackLegs, enabled: webcam.ready });
 
   return (
     <div className="app">
       <header className="topbar">
         <h1>
-          vtube <span className="sub">milestone 1 — webcam mocap</span>
+          vtube <span className="sub">milestone 2 — full-body mocap</span>
         </h1>
         <div className="controls">
           <label className="toggle">
@@ -35,6 +37,22 @@ export default function App() {
           <label className="toggle">
             <input
               type="checkbox"
+              checked={trackLegs}
+              onChange={(e) => setTrackLegs(e.target.checked)}
+            />
+            legs
+          </label>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={viewMode === "full"}
+              onChange={(e) => setViewMode(e.target.checked ? "full" : "bust")}
+            />
+            full-body view
+          </label>
+          <label className="toggle">
+            <input
+              type="checkbox"
               checked={showOverlay}
               onChange={(e) => setShowOverlay(e.target.checked)}
             />
@@ -42,8 +60,11 @@ export default function App() {
           </label>
           <CalibrationPanel
             calibrating={mocap.state.calibrating}
-            calibrated={mocap.state.calibrated}
+            calibrationCountdown={mocap.state.calibrationCountdown}
+            faceCalibrated={mocap.state.faceCalibrated}
+            bodyCalibrated={mocap.state.bodyCalibrated}
             faceTracked={mocap.state.faceConfidence > 0}
+            poseTracked={mocap.state.poseConfidence > 0.5}
             onCalibrate={mocap.calibrate}
             onClear={mocap.clearCalibration}
           />
@@ -65,7 +86,11 @@ export default function App() {
         </section>
 
         <section className="pane">
-          <AvatarViewport frameRef={mocap.frameRef} onExpressionMap={setExpressionMap} />
+          <AvatarViewport
+            frameRef={mocap.frameRef}
+            viewMode={viewMode}
+            onExpressionMap={setExpressionMap}
+          />
         </section>
       </main>
 
