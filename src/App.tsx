@@ -23,7 +23,8 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <h1>
-          vtube <span className="sub">milestone 2 — full-body mocap</span>
+          vtube <span className="sub">milestone 2 — full-body mocap</span>{" "}
+          <span className="sub" style={{ opacity: 0.45, fontSize: "0.65em" }}>vtubemaker</span>
         </h1>
         <div className="controls">
           <label className="toggle">
