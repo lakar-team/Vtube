@@ -163,8 +163,10 @@ export function SkeletonViewport({
     const matL     = new THREE.MeshLambertMaterial({ color: 0x4477cc }); // blue  = left
     const matR     = new THREE.MeshLambertMaterial({ color: 0xcc3344 }); // red   = right
     const matC     = new THREE.MeshLambertMaterial({ color: 0xd4b080 }); // tan   = centre
-    const matFace  = new THREE.MeshLambertMaterial({ color: 0x446688 }); // teal  = iris
-    const matMouth = new THREE.MeshLambertMaterial({ color: 0x773333 }); // maroon = mouth
+    // Face features use depthTest:false so they always appear in front of body
+    // geometry — in a diagnostic tool, guaranteed visibility beats occlusion realism.
+    const matFace  = new THREE.MeshLambertMaterial({ color: 0x66bbff, depthTest: false }); // bright sky-blue = iris
+    const matMouth = new THREE.MeshLambertMaterial({ color: 0xff7755, depthTest: false }); // coral = mouth
 
     // ── body radii (world units; full-body height ≈ 0.8 world units)
     const R_HEAD  = 0.045;
@@ -208,10 +210,11 @@ export function SkeletonViewport({
     const hRJoints = Array.from({ length: 21 }, () => mkS(R_HAND_JNT, matR));
 
     // ── face features (iris, nose tip, mouth line)
-    const mIrisL   = mkS(0.008, matFace);
-    const mIrisR   = mkS(0.008, matFace);
-    const mNoseTip = mkS(0.006, matC);
-    const mMouth   = mkC(0.004, matMouth);
+    // Larger radii so they're clearly visible even on a small viewport.
+    const mIrisL   = mkS(0.014, matFace);
+    const mIrisR   = mkS(0.014, matFace);
+    const mNoseTip = mkS(0.010, matFace);
+    const mMouth   = mkC(0.007, matMouth);
 
     const bodyMeshes: THREE.Mesh[] = [
       mHead, mNeck, mTorso,
@@ -227,6 +230,9 @@ export function SkeletonViewport({
     const allMeshes = [...bodyMeshes, ...handMeshes, ...faceMeshes];
 
     for (const m of allMeshes) { m.visible = false; scene.add(m); }
+    // Face features always draw after the body so depthTest:false reads as
+    // "on top of everything" rather than "randomly z-sorted".
+    for (const m of faceMeshes) m.renderOrder = 1;
 
     let disposed = false;
 
@@ -304,15 +310,15 @@ export function SkeletonViewport({
       //   468 = left iris centre, 473 = right iris centre
       //   4   = nose tip, 61/291 = mouth corners
       //
-      //   Face mesh z-coords centre on the head interior, so the raw world_z
-      //   lands inside the opaque head sphere (r=0.045) and fails depth testing.
-      //   Fix: project features at a fixed z just in front of the head sphere.
+      //   All body geometry sits at world_z ≈ 0-0.1. Pinning face features to
+      //   z=0.5 puts them between the body and the camera (z=5) so they are
+      //   never occluded; depthTest:false on their material removes the last risk.
       const face = debugLandmarksRef.current.face;
-      const faceZ = (nose?.z ?? 0) + R_HEAD + 0.01; // just past head sphere surface
+      const FACE_Z = 0.5; // constant — well in front of all body parts
       const WF = (lms: NormalizedLandmark[] | null, i: number): THREE.Vector3 | null => {
         const lm = lms?.[i];
         if (!lm) return null;
-        return new THREE.Vector3(mx * (lm.x - 0.5) * asp, -(lm.y - 0.5), faceZ);
+        return new THREE.Vector3(mx * (lm.x - 0.5) * asp, -(lm.y - 0.5), FACE_Z);
       };
       placeSph(mIrisL,   WF(face, 468));
       placeSph(mIrisR,   WF(face, 473));
