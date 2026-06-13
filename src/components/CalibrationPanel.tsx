@@ -84,7 +84,7 @@ export function CalibrationPanel({
         disabled={calibrating !== null || !poseTracked}
         title={
           poseTracked
-            ? "The avatar will demonstrate 3 quick poses (relax, half raise, bow) — copy each one. No T-pose, no extra room needed."
+            ? "The avatar will demonstrate 7 poses (relax, half raise, bow, hands on hips, arms raised, salute, arms crossed) — copy each one. No T-pose, no extra room needed."
             : "Body not tracked yet — get in frame first"
         }
       >

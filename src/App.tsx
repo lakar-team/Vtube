@@ -63,8 +63,36 @@ export default function App() {
     };
   }, []);
 
+  const bodyPose = mocap.state.bodyPose;
+
   return (
     <div className="app">
+      {/* Large countdown overlay — visible from across the room. */}
+      {mocap.state.calibrating === "body" && bodyPose && (
+        <div className="calib-overlay">
+          <div className="calib-overlay-step">
+            pose {bodyPose.index + 1}/{bodyPose.total} — {bodyPose.pose.title}
+          </div>
+          {bodyPose.phase === "countdown" ? (
+            <>
+              <div className="calib-overlay-number">{bodyPose.countdown}</div>
+              <div className="calib-overlay-instruction">
+                {bodyPose.pose.instruction}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="calib-overlay-hold">Hold it!</div>
+              <div className="calib-overlay-progress-track">
+                <div
+                  className="calib-overlay-progress-bar"
+                  style={{ width: `${Math.round(bodyPose.progress * 100)}%` }}
+                />
+              </div>
+            </>
+          )}
+        </div>
+      )}
       <header className="topbar">
         <h1>
           vtube <span className="sub">milestone 2 — full-body mocap</span>{" "}

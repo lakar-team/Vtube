@@ -70,7 +70,14 @@ export type CalibrationMode = "face" | "body";
 // ---------------------------------------------------------------------------
 // Body pose sequence definitions
 
-export type BodyPoseId = "neutral" | "raise" | "bow";
+export type BodyPoseId =
+  | "neutral"
+  | "raise"
+  | "bow"
+  | "hips"
+  | "overhead"
+  | "salute"
+  | "cross";
 
 export interface CalibrationPoseDef {
   id: BodyPoseId;
@@ -103,6 +110,11 @@ function demoArms(leftZ: number): ArmRotations {
   };
 }
 
+/** Demonstrated "hands on hips": upper arms near horizontal, elbows out. */
+const HIPS_Z = 0.3;
+/** Demonstrated overhead: upper arms raised about 45° above horizontal. */
+const OVERHEAD_Z = -0.6;
+
 export const BODY_POSE_SEQUENCE: CalibrationPoseDef[] = [
   {
     id: "neutral",
@@ -124,6 +136,67 @@ export const BODY_POSE_SEQUENCE: CalibrationPoseDef[] = [
     instruction: "Lean your upper body forward about 30°, like the avatar.",
     demo: { spine: { x: -BOW_DEMO_PITCH, y: 0, z: 0 }, arms: demoArms(RELAX_Z) },
   },
+  {
+    id: "hips",
+    title: "Hands on hips",
+    instruction:
+      "Rest both hands on your hips with elbows pointing out to the sides, like the avatar.",
+    demo: {
+      spine: zeroEuler(),
+      arms: {
+        leftUpperArm:  { x: 0, y: 0, z: HIPS_Z },
+        leftLowerArm:  { x: 0, y: 0, z: 1.2 },  // forearm bends down toward hip
+        rightUpperArm: { x: 0, y: 0, z: -HIPS_Z },
+        rightLowerArm: { x: 0, y: 0, z: -1.2 },
+      },
+    },
+  },
+  {
+    id: "overhead",
+    title: "Arms raised",
+    instruction:
+      "Raise both arms above your head with elbows roughly straight, like the avatar.",
+    demo: {
+      spine: zeroEuler(),
+      arms: {
+        leftUpperArm:  { x: 0, y: 0, z: OVERHEAD_Z },
+        leftLowerArm:  zeroEuler(),
+        rightUpperArm: { x: 0, y: 0, z: -OVERHEAD_Z },
+        rightLowerArm: zeroEuler(),
+      },
+    },
+  },
+  {
+    id: "salute",
+    title: "Salute",
+    instruction:
+      "Bring one hand up to your forehead in a salute, other arm relaxed at your side.",
+    demo: {
+      spine: zeroEuler(),
+      arms: {
+        // Avatar's left arm salutes (user raises their right arm in mirror mode).
+        leftUpperArm:  { x: 0, y: -0.4, z: 0.2 },  // near-horizontal, angled forward
+        leftLowerArm:  { x: 0, y: 0, z: -1.3 },     // forearm bends up toward head
+        rightUpperArm: { x: 0, y: 0, z: -RELAX_Z }, // right arm relaxed
+        rightLowerArm: zeroEuler(),
+      },
+    },
+  },
+  {
+    id: "cross",
+    title: "Arms crossed",
+    instruction:
+      "Fold both arms across your chest, like the avatar.",
+    demo: {
+      spine: zeroEuler(),
+      arms: {
+        leftUpperArm:  { x: 0, y: -0.8, z: 0.7 },  // brought forward and across
+        leftLowerArm:  { x: 0, y: -0.3, z: -0.5 },
+        rightUpperArm: { x: 0, y: 0.8, z: -0.7 },
+        rightLowerArm: { x: 0, y: 0.3, z: 0.5 },
+      },
+    },
+  },
 ];
 
 /**
@@ -133,25 +206,51 @@ export const BODY_POSE_SEQUENCE: CalibrationPoseDef[] = [
  * the pose itself, which must keep flowing through live.
  * NaN marks a channel that is degenerate in that pose (excluded from the
  * offset for that pose).
+ *
+ * Formula recap (from Kalidokit calcArms source):
+ *   upperArm.z = ∓2.3·θ/π   (θ = drop angle below horizontal; left=+, right=−)
+ *   upperArm.y = ∓θ          (same sign convention as z)
+ *   upperArm.x = atan2-based; only non-degenerate when arm is not pointing straight up/down.
  */
 const EXPECTED_ARMS: Record<BodyPoseId, ArmRotations | null> = {
   neutral: {
-    // Arms hanging straight down: z = ∓2.3·(π/2)/π = ∓1.15; y = ±π/2
-    // (Kalidokit's unsigned shoulder angle, scaled); x is atan2(≈0,≈0) noise.
-    leftUpperArm: { x: NaN, y: -Math.PI / 2, z: 1.15 },
-    leftLowerArm: { x: NaN, y: 0, z: 0 },
+    // Arms hanging straight down: θ = π/2
+    // z = ∓2.3·(π/2)/π = ∓1.15; y = ∓π/2; x is atan2(≈0,≈0) noise.
+    leftUpperArm:  { x: NaN, y: -Math.PI / 2, z: 1.15 },
+    leftLowerArm:  { x: NaN, y: 0, z: 0 },
     rightUpperArm: { x: NaN, y: Math.PI / 2, z: -1.15 },
     rightLowerArm: { x: NaN, y: 0, z: 0 },
   },
   raise: {
-    // 45° below horizontal: z = ∓2.3·(π/4)/π = ∓0.575; y = ±π/4;
-    // x = normalizeRadians(±π/2) − 0.3·invert = ∓0.2.
-    leftUpperArm: { x: -0.2, y: -Math.PI / 4, z: 0.575 },
-    leftLowerArm: { x: 0, y: 0, z: 0 },
+    // 45° below horizontal: θ = π/4
+    // z = ∓2.3·(π/4)/π = ∓0.575; y = ∓π/4; x = ∓0.2.
+    leftUpperArm:  { x: -0.2, y: -Math.PI / 4, z: 0.575 },
+    leftLowerArm:  { x: 0, y: 0, z: 0 },
     rightUpperArm: { x: 0.2, y: Math.PI / 4, z: -0.575 },
     rightLowerArm: { x: 0, y: 0, z: 0 },
   },
-  bow: null, // arms not calibrated from the bow pose
+  bow: null,  // arms not calibrated from the bow pose
+  hips: {
+    // Upper arms near horizontal (θ ≈ π/6, ~30° below horizontal).
+    // z = ∓2.3·(π/6)/π ≈ ∓0.383; y = ∓π/6 ≈ ∓0.524.
+    // Lower arm is bent at the elbow — degenerate for calibration purposes.
+    leftUpperArm:  { x: NaN, y: -Math.PI / 6, z: 0.383 },
+    leftLowerArm:  { x: NaN, y: NaN, z: NaN },
+    rightUpperArm: { x: NaN, y: Math.PI / 6, z: -0.383 },
+    rightLowerArm: { x: NaN, y: NaN, z: NaN },
+  },
+  overhead: {
+    // Arms raised ~45° above horizontal: θ = −π/4.
+    // z = ∓2.3·(−π/4)/π ≈ ∓(−0.575); y = ∓(−π/4).
+    leftUpperArm:  { x: NaN, y: Math.PI / 4, z: -0.575 },
+    leftLowerArm:  { x: 0, y: 0, z: 0 },
+    rightUpperArm: { x: NaN, y: -Math.PI / 4, z: 0.575 },
+    rightLowerArm: { x: 0, y: 0, z: 0 },
+  },
+  // Salute and cross are asymmetric / complex — captured for display and
+  // future use, but not used in the current arm-offset calibration.
+  salute: null,
+  cross:  null,
 };
 
 /**
@@ -160,10 +259,6 @@ const EXPECTED_ARMS: Record<BodyPoseId, ArmRotations | null> = {
  * pose, occlusion) and baking it in would distort live tracking.
  */
 const ARM_OFFSET_LIMIT = 0.45;
-
-/** Blend weights when both arm anchors were captured: the neutral pose is
- *  where arms live most of the time, so it dominates. */
-const NEUTRAL_ARM_WEIGHT = 0.6;
 
 // ---------------------------------------------------------------------------
 // Data model
@@ -445,7 +540,7 @@ export class BodySequenceRecorder {
     const neutral = this.sums.get("neutral") ?? null;
     const raise = this.sums.get("raise") ?? null;
     const bow = this.sums.get("bow") ?? null;
-    if (!neutral && !raise && !bow) return null;
+    if (this.sums.size === 0) return null;
 
     const out: CalibrationData = prev ? { ...prev } : emptyCalibration();
     let body: BodyCalibrationData | null = out.body
@@ -501,27 +596,44 @@ export class BodySequenceRecorder {
       body.spine = { ...body.spine, x: 0 };
     }
 
-    // ---- arms: blend the available anchors
-    if (body && (neutral || raise)) {
-      const nOff = this.armOffsets("neutral");
-      const rOff = this.armOffsets("raise");
+    // ---- arms: weighted blend across all available anchor poses.
+    // Higher weight = more influence on the final calibration offset.
+    // Neutral dominates as the primary resting position; other anchors extend
+    // coverage across the arm-angle range (e.g. hips/overhead fix the offset
+    // estimate for arm positions not well represented by neutral+raise alone).
+    // NaN-expected channels (degenerate in a given pose) are excluded from the
+    // weighted sum so they can't corrupt channels that ARE meaningful there.
+    const ARM_ANCHOR_WEIGHTS: Partial<Record<BodyPoseId, number>> = {
+      neutral:  0.50,
+      raise:    0.20,
+      hips:     0.20,
+      overhead: 0.10,
+    };
+    const armCandidates = (
+      Object.entries(ARM_ANCHOR_WEIGHTS) as Array<[BodyPoseId, number]>
+    )
+      .map(([id, w]) => ({ off: this.armOffsets(id), w }))
+      .filter(
+        (e): e is { off: Partial<Record<ArmKey, EulerRotation>>; w: number } =>
+          e.off !== null,
+      );
+
+    if (body && armCandidates.length > 0) {
       const lim = (v: number) =>
         Number.isNaN(v) ? 0 : clamp(v, -ARM_OFFSET_LIMIT, ARM_OFFSET_LIMIT);
       for (const k of ARM_KEYS) {
-        const nv = nOff?.[k];
-        const rv = rOff?.[k];
-        if (nv && rv) {
-          const w = NEUTRAL_ARM_WEIGHT;
-          body.arms[k] = {
-            // Neutral's x is degenerate (NaN) — raise is the only x source.
-            x: lim(rv.x),
-            y: lim(nv.y * w + rv.y * (1 - w)),
-            z: lim(nv.z * w + rv.z * (1 - w)),
-          };
-        } else if (nv || rv) {
-          const v = (nv ?? rv) as EulerRotation;
-          body.arms[k] = { x: lim(v.x), y: lim(v.y), z: lim(v.z) };
-        }
+        const blendAxis = (axis: "x" | "y" | "z"): number => {
+          let wsum = 0;
+          let vsum = 0;
+          for (const { off, w } of armCandidates) {
+            const v = off[k]?.[axis];
+            if (v === undefined || Number.isNaN(v)) continue;
+            vsum += v * w;
+            wsum += w;
+          }
+          return wsum > 0 ? lim(vsum / wsum) : 0;
+        };
+        body.arms[k] = { x: blendAxis("x"), y: blendAxis("y"), z: blendAxis("z") };
       }
     }
 
