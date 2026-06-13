@@ -5,8 +5,8 @@ import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import type { DebugLandmarks } from "../mocap/types";
 
 /**
- * Mannequin diagnostic viewport — raw MediaPipe pose + hand landmark positions
- * rendered as a wooden-artist-mannequin stick figure with volume.
+ * Mannequin diagnostic viewport — raw MediaPipe pose + hand + face landmark
+ * positions rendered as a wooden-artist-mannequin figure with volume.
  *
  * COORDINATE SYSTEM (key to positional accuracy):
  *   We use an OrthographicCamera whose frustum exactly covers the normalized
@@ -17,39 +17,38 @@ import type { DebugLandmarks } from "../mocap/types";
  *     world_z = -(lm.z ?? 0) * Z_SCALE  (cosmetic depth only)
  *
  *   This makes every landmark project to the exact same screen pixel as the
- *   corresponding dot drawn on the 2D webcam overlay canvas, since both use
- *   `lm.x * containerWidth` / `lm.y * containerHeight`.
- *
- *   The earlier PerspectiveCamera + SCALE=4.0 approach was wrong: with a
- *   perspective camera at z=5.5, FOV=60°, the visible half-width ≈ 3.18 units,
- *   so a landmark at lm.x=0.8 projected to ~69% from the left, not 80%.
+ *   corresponding dot drawn on the 2D webcam overlay canvas.
  */
 
-const Z_SCALE   = 0.5;
-const MIN_VIS   = 0.45;
+const Z_SCALE = 0.5;
+const MIN_VIS = 0.45;
+const HALF_H  = 0.5;
 
-const HAND_CONNECTIONS: ReadonlyArray<readonly [number, number]> = [
-  [0, 1], [1, 2], [2, 3], [3, 4],
-  [0, 5], [5, 6], [6, 7], [7, 8],
-  [5, 9], [9, 10], [10, 11], [11, 12],
-  [9, 13], [13, 14], [14, 15], [15, 16],
-  [13, 17], [17, 18], [18, 19], [19, 20],
-  [0, 17],
-];
+// Hand segment definitions: [fromLandmark, toLandmark, radius]
+const HAND_SEGS: ReadonlyArray<readonly [number, number, number]> = [
+  // palm / metacarpals
+  [0,  1, 0.010], [0,  5, 0.010], [0,  9, 0.010], [0, 13, 0.010], [0, 17, 0.010],
+  [5,  9, 0.010], [9, 13, 0.010], [13, 17, 0.010],
+  // proximal phalanges
+  [1,  2, 0.008], [5,  6, 0.008], [9, 10, 0.008], [13, 14, 0.008], [17, 18, 0.008],
+  // mid + distal phalanges
+  [2,  3, 0.006], [3,  4, 0.006],
+  [6,  7, 0.006], [7,  8, 0.006],
+  [10, 11, 0.006], [11, 12, 0.006],
+  [14, 15, 0.006], [15, 16, 0.006],
+  [18, 19, 0.006], [19, 20, 0.006],
+]; // 23 segments per hand
 
-// ─── Three.js temporary objects (shared, never mutated in parallel) ──────────
-const _v  = new THREE.Vector3();
+const R_HAND_JNT = 0.009;
+
+// ─── shared temporaries (never used concurrently) ──────────────────────────
 const _v2 = new THREE.Vector3();
 const _q  = new THREE.Quaternion();
 const _Y  = new THREE.Vector3(0, 1, 0);
 
 // ─── coordinate mapping ──────────────────────────────────────────────────────
 
-function lmW(
-  lm: NormalizedLandmark,
-  mx: number,
-  aspect: number,
-): THREE.Vector3 {
+function lmW(lm: NormalizedLandmark, mx: number, aspect: number): THREE.Vector3 {
   return new THREE.Vector3(
     mx * (lm.x - 0.5) * aspect,
     -(lm.y - 0.5),
@@ -72,22 +71,14 @@ function midW(
 
 // ─── mesh helpers ────────────────────────────────────────────────────────────
 
-function makeCylMesh(
-  r: number,
-  mat: THREE.Material,
-): THREE.Mesh {
-  // CylinderGeometry along Y-axis, height=1 → scale.y = actual length per frame
+function makeCylMesh(r: number, mat: THREE.Material): THREE.Mesh {
   return new THREE.Mesh(new THREE.CylinderGeometry(r, r, 1, 10, 1), mat);
 }
 
-function makeSphereMesh(
-  r: number,
-  mat: THREE.Material,
-): THREE.Mesh {
+function makeSphereMesh(r: number, mat: THREE.Material): THREE.Mesh {
   return new THREE.Mesh(new THREE.SphereGeometry(r, 12, 8), mat);
 }
 
-// Place a cylinder between two world points; hides mesh if either is null.
 function placeCyl(
   mesh: THREE.Mesh,
   a: THREE.Vector3 | null,
@@ -104,54 +95,10 @@ function placeCyl(
   mesh.scale.y = len;
 }
 
-// Place a sphere at a world point; hides mesh if null.
-function placeSph(
-  mesh: THREE.Mesh,
-  p: THREE.Vector3 | null,
-): void {
+function placeSph(mesh: THREE.Mesh, p: THREE.Vector3 | null): void {
   if (!p) { mesh.visible = false; return; }
   mesh.visible = true;
   mesh.position.copy(p);
-}
-
-// Update a LineSegments buffer from a landmark array + connection list.
-function writeHandLines(
-  seg: THREE.LineSegments,
-  lms: NormalizedLandmark[] | null,
-  pairs: ReadonlyArray<readonly [number, number]>,
-  mx: number,
-  aspect: number,
-): void {
-  if (!lms) { seg.visible = false; return; }
-  seg.visible = true;
-  const attr = seg.geometry.attributes.position as THREE.BufferAttribute;
-  const arr = attr.array as Float32Array;
-  let i = 0;
-  for (const [a, b] of pairs) {
-    const la = lms[a], lb = lms[b];
-    if (la && lb) {
-      arr[i++] = mx * (la.x - 0.5) * aspect;
-      arr[i++] = -(la.y - 0.5);
-      arr[i++] = -(la.z ?? 0) * Z_SCALE;
-      arr[i++] = mx * (lb.x - 0.5) * aspect;
-      arr[i++] = -(lb.y - 0.5);
-      arr[i++] = -(lb.z ?? 0) * Z_SCALE;
-    } else {
-      arr[i] = arr[i+1] = arr[i+2] = arr[i+3] = arr[i+4] = arr[i+5] = 0;
-      i += 6;
-    }
-  }
-  attr.needsUpdate = true;
-}
-
-function makeHandLines(color: number): THREE.LineSegments {
-  const buf = new Float32Array(HAND_CONNECTIONS.length * 6);
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute(
-    "position",
-    new THREE.BufferAttribute(buf, 3).setUsage(THREE.DynamicDrawUsage),
-  );
-  return new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color }));
 }
 
 // ─── component ───────────────────────────────────────────────────────────────
@@ -185,9 +132,6 @@ export function SkeletonViewport({
     const scene = new THREE.Scene();
 
     // ── orthographic camera: frustum covers lm.x=[0,1], lm.y=[0,1]
-    // This makes the projected position of any landmark exactly match
-    // where the same landmark is drawn on the 2D canvas overlay.
-    const HALF_H = 0.5;
     aspectRef.current = container.clientWidth / Math.max(container.clientHeight, 1);
     const camera = new THREE.OrthographicCamera(
       -HALF_H * aspectRef.current,
@@ -199,7 +143,7 @@ export function SkeletonViewport({
     camera.position.set(0, 0, 5);
     camera.lookAt(0, 0, 0);
 
-    // ── lighting (required for MeshLambertMaterial shading)
+    // ── lighting
     const keyLight = new THREE.DirectionalLight(0xffffff, Math.PI * 0.8);
     keyLight.position.set(0.5, 1, 2);
     scene.add(keyLight);
@@ -208,22 +152,21 @@ export function SkeletonViewport({
     scene.add(fillLight);
     scene.add(new THREE.AmbientLight(0xffffff, 0.55));
 
-    // ── grid floor — in orthographic coords, lm.y=1.0 → world y = -0.5
+    // ── grid floor
     const grid = new THREE.GridHelper(
       aspectRef.current * 2, 20, 0x333355, 0x1a1a2e,
     );
     grid.position.y = -0.53;
     scene.add(grid);
 
-    // ── materials (one per side + center)
-    // Muted blue/red keep the L/R diagnostic signal; warm tan for torso/head.
-    const matL = new THREE.MeshLambertMaterial({ color: 0x4477cc });
-    const matR = new THREE.MeshLambertMaterial({ color: 0xcc3344 });
-    const matC = new THREE.MeshLambertMaterial({ color: 0xd4b080 }); // warm wood
+    // ── materials
+    const matL     = new THREE.MeshLambertMaterial({ color: 0x4477cc }); // blue  = left
+    const matR     = new THREE.MeshLambertMaterial({ color: 0xcc3344 }); // red   = right
+    const matC     = new THREE.MeshLambertMaterial({ color: 0xd4b080 }); // tan   = centre
+    const matFace  = new THREE.MeshLambertMaterial({ color: 0x446688 }); // teal  = iris
+    const matMouth = new THREE.MeshLambertMaterial({ color: 0x773333 }); // maroon = mouth
 
-    // Radii in world units.  With ortho HALF_H=0.5, full screen height = 1.0.
-    // A typical standing body spans ~0.8 world units (lm.y 0.05→0.85 → ±0.4 from center).
-    // Radius sizing matches a wooden artist's mannequin: limbs ≈ 8-12% of limb length.
+    // ── body radii (world units; full-body height ≈ 0.8 world units)
     const R_HEAD  = 0.045;
     const R_NECK  = 0.016;
     const R_TORSO = 0.055;
@@ -233,84 +176,86 @@ export function SkeletonViewport({
     const R_ULEG  = 0.026;
     const R_LLEG  = 0.021;
     const R_FOOT  = 0.014;
-    const R_JNT   = 0.022;  // ball joints (slightly larger than limbs)
+    const R_JNT   = 0.022;
 
-    // ── mannequin meshes (each created once, repositioned each frame)
     const mkC = (r: number, m: THREE.Material) => makeCylMesh(r, m);
     const mkS = (r: number, m: THREE.Material) => makeSphereMesh(r, m);
 
-    // body segments
-    const mHead    = mkS(R_HEAD,  matC);
-    const mNeck    = mkC(R_NECK,  matC);
-    const mTorso   = mkC(R_TORSO, matC);
+    // ── body segments
+    const mHead  = mkS(R_HEAD,  matC);
+    const mNeck  = mkC(R_NECK,  matC);
+    const mTorso = mkC(R_TORSO, matC);
 
-    const mUArmL   = mkC(R_UARM, matL);
-    const mLArmL   = mkC(R_LARM, matL);
-    const mHandL   = mkS(R_HAND, matL);
-    const mULegL   = mkC(R_ULEG, matL);
-    const mLLegL   = mkC(R_LLEG, matL);
-    const mFootL   = mkC(R_FOOT, matL);
+    const mUArmL = mkC(R_UARM, matL); const mUArmR = mkC(R_UARM, matR);
+    const mLArmL = mkC(R_LARM, matL); const mLArmR = mkC(R_LARM, matR);
+    const mHandL = mkS(R_HAND, matL); const mHandR = mkS(R_HAND, matR);
+    const mULegL = mkC(R_ULEG, matL); const mULegR = mkC(R_ULEG, matR);
+    const mLLegL = mkC(R_LLEG, matL); const mLLegR = mkC(R_LLEG, matR);
+    const mFootL = mkC(R_FOOT, matL); const mFootR = mkC(R_FOOT, matR);
 
-    const mUArmR   = mkC(R_UARM, matR);
-    const mLArmR   = mkC(R_LARM, matR);
-    const mHandR   = mkS(R_HAND, matR);
-    const mULegR   = mkC(R_ULEG, matR);
-    const mLLegR   = mkC(R_LLEG, matR);
-    const mFootR   = mkC(R_FOOT, matR);
+    // ── ball joints
+    const mJShL = mkS(R_JNT, matL); const mJShR = mkS(R_JNT, matR);
+    const mJElL = mkS(R_JNT, matL); const mJElR = mkS(R_JNT, matR);
+    const mJWrL = mkS(R_JNT, matL); const mJWrR = mkS(R_JNT, matR);
+    const mJHpL = mkS(R_JNT, matL); const mJHpR = mkS(R_JNT, matR);
+    const mJKnL = mkS(R_JNT, matL); const mJKnR = mkS(R_JNT, matR);
+    const mJAnL = mkS(R_JNT, matL); const mJAnR = mkS(R_JNT, matR);
 
-    // ball joints
-    const mJShL    = mkS(R_JNT, matL);
-    const mJElL    = mkS(R_JNT, matL);
-    const mJWrL    = mkS(R_JNT, matL);
-    const mJHpL    = mkS(R_JNT, matL);
-    const mJKnL    = mkS(R_JNT, matL);
-    const mJAnL    = mkS(R_JNT, matL);
+    // ── hand finger cylinders + joint spheres (one array per hand)
+    const hLCyls   = HAND_SEGS.map((seg) => mkC(seg[2], matL));
+    const hRCyls   = HAND_SEGS.map((seg) => mkC(seg[2], matR));
+    const hLJoints = Array.from({ length: 21 }, () => mkS(R_HAND_JNT, matL));
+    const hRJoints = Array.from({ length: 21 }, () => mkS(R_HAND_JNT, matR));
 
-    const mJShR    = mkS(R_JNT, matR);
-    const mJElR    = mkS(R_JNT, matR);
-    const mJWrR    = mkS(R_JNT, matR);
-    const mJHpR    = mkS(R_JNT, matR);
-    const mJKnR    = mkS(R_JNT, matR);
-    const mJAnR    = mkS(R_JNT, matR);
+    // ── face features (iris, nose tip, mouth line)
+    const mIrisL   = mkS(0.008, matFace);
+    const mIrisR   = mkS(0.008, matFace);
+    const mNoseTip = mkS(0.006, matC);
+    const mMouth   = mkC(0.004, matMouth);
 
-    const allMeshes = [
+    const bodyMeshes: THREE.Mesh[] = [
       mHead, mNeck, mTorso,
       mUArmL, mLArmL, mHandL, mULegL, mLLegL, mFootL,
       mUArmR, mLArmR, mHandR, mULegR, mLLegR, mFootR,
       mJShL, mJElL, mJWrL, mJHpL, mJKnL, mJAnL,
       mJShR, mJElR, mJWrR, mJHpR, mJKnR, mJAnR,
     ];
-    for (const m of allMeshes) { m.visible = false; scene.add(m); }
+    const handMeshes: THREE.Mesh[] = [
+      ...hLCyls, ...hRCyls, ...hLJoints, ...hRJoints,
+    ];
+    const faceMeshes: THREE.Mesh[] = [mIrisL, mIrisR, mNoseTip, mMouth];
+    const allMeshes = [...bodyMeshes, ...handMeshes, ...faceMeshes];
 
-    // ── hand finger line segments (too fine for cylinders)
-    const hLLines = makeHandLines(0x6699ee);
-    const hRLines = makeHandLines(0xee6677);
-    scene.add(hLLines, hRLines);
+    for (const m of allMeshes) { m.visible = false; scene.add(m); }
 
     let disposed = false;
 
     renderer.setAnimationLoop(() => {
       if (disposed) return;
 
-      const pose  = debugLandmarksRef.current.pose;
-      const mx    = mirrorRef.current ? -1 : 1;
-      const asp   = aspectRef.current;
+      const pose = debugLandmarksRef.current.pose;
+      const mx   = mirrorRef.current ? -1 : 1;
+      const asp  = aspectRef.current;
 
-      // Return world pos for pose landmark `i` if visible, else null.
+      // World pos for pose landmark (with visibility gate).
       const W = (i: number): THREE.Vector3 | null => {
         const lm = pose?.[i];
         return lm && (lm.visibility ?? 1) >= MIN_VIS ? lmW(lm, mx, asp) : null;
       };
-
-      // Midpoint of two visible landmarks, else null.
+      // Midpoint of two pose landmarks.
       const M = (i: number, j: number): THREE.Vector3 | null => {
         const a = pose?.[i], b = pose?.[j];
         if (!a || !b) return null;
         if ((a.visibility ?? 1) < MIN_VIS || (b.visibility ?? 1) < MIN_VIS) return null;
         return midW(a, b, mx, asp);
       };
+      // World pos for hand / face landmarks (no visibility field).
+      const WL = (lms: NormalizedLandmark[] | null, i: number): THREE.Vector3 | null => {
+        const lm = lms?.[i];
+        return lm ? lmW(lm, mx, asp) : null;
+      };
 
-      // Named positions
+      // ── named pose positions
       const nose   = W(0);
       const shlL   = W(11),  shlR   = W(12);
       const elbL   = W(13),  elbR   = W(14);
@@ -322,41 +267,52 @@ export function SkeletonViewport({
       const midShl = M(11, 12);
       const midHip = M(23, 24);
 
-      // ── body segments
-      placeSph(mHead,   nose);
-      placeCyl(mNeck,   nose,   midShl);
-      placeCyl(mTorso,  midShl, midHip);
+      // ── body
+      placeSph(mHead,  nose);
+      placeCyl(mNeck,  nose,   midShl);
+      placeCyl(mTorso, midShl, midHip);
 
-      placeCyl(mUArmL,  shlL,   elbL);
-      placeCyl(mLArmL,  elbL,   wristL);
-      placeSph(mHandL,  wristL);
-      placeCyl(mULegL,  hipL,   kneeL);
-      placeCyl(mLLegL,  kneeL,  ankleL);
-      placeCyl(mFootL,  ankleL, toeL);
-
-      placeCyl(mUArmR,  shlR,   elbR);
-      placeCyl(mLArmR,  elbR,   wristR);
-      placeSph(mHandR,  wristR);
-      placeCyl(mULegR,  hipR,   kneeR);
-      placeCyl(mLLegR,  kneeR,  ankleR);
-      placeCyl(mFootR,  ankleR, toeR);
+      placeCyl(mUArmL, shlL,   elbL);    placeCyl(mUArmR, shlR,   elbR);
+      placeCyl(mLArmL, elbL,   wristL);  placeCyl(mLArmR, elbR,   wristR);
+      placeSph(mHandL, wristL);           placeSph(mHandR, wristR);
+      placeCyl(mULegL, hipL,   kneeL);   placeCyl(mULegR, hipR,   kneeR);
+      placeCyl(mLLegL, kneeL,  ankleL);  placeCyl(mLLegR, kneeR,  ankleR);
+      placeCyl(mFootL, ankleL, toeL);    placeCyl(mFootR, ankleR, toeR);
 
       // ── ball joints
-      placeSph(mJShL,  shlL);    placeSph(mJShR,  shlR);
-      placeSph(mJElL,  elbL);    placeSph(mJElR,  elbR);
-      placeSph(mJWrL,  wristL);  placeSph(mJWrR,  wristR);
-      placeSph(mJHpL,  hipL);    placeSph(mJHpR,  hipR);
-      placeSph(mJKnL,  kneeL);   placeSph(mJKnR,  kneeR);
-      placeSph(mJAnL,  ankleL);  placeSph(mJAnR,  ankleR);
+      placeSph(mJShL, shlL);    placeSph(mJShR, shlR);
+      placeSph(mJElL, elbL);    placeSph(mJElR, elbR);
+      placeSph(mJWrL, wristL);  placeSph(mJWrR, wristR);
+      placeSph(mJHpL, hipL);    placeSph(mJHpR, hipR);
+      placeSph(mJKnL, kneeL);   placeSph(mJKnR, kneeR);
+      placeSph(mJAnL, ankleL);  placeSph(mJAnR, ankleR);
 
-      // ── hands (finger lines, image-space landmarks)
-      writeHandLines(hLLines, debugLandmarksRef.current.leftHand,  HAND_CONNECTIONS, mx, asp);
-      writeHandLines(hRLines, debugLandmarksRef.current.rightHand, HAND_CONNECTIONS, mx, asp);
+      // ── hand fingers
+      const lHand = debugLandmarksRef.current.leftHand;
+      const rHand = debugLandmarksRef.current.rightHand;
+      for (let s = 0; s < HAND_SEGS.length; s++) {
+        const [a, b] = HAND_SEGS[s];
+        placeCyl(hLCyls[s], WL(lHand, a), WL(lHand, b));
+        placeCyl(hRCyls[s], WL(rHand, a), WL(rHand, b));
+      }
+      for (let j = 0; j < 21; j++) {
+        placeSph(hLJoints[j], WL(lHand, j));
+        placeSph(hRJoints[j], WL(rHand, j));
+      }
+
+      // ── face features (MediaPipe face mesh: 468 landmarks + 10 iris)
+      //   468 = left iris centre, 473 = right iris centre
+      //   4   = nose tip, 61/291 = mouth corners
+      const face = debugLandmarksRef.current.face;
+      placeSph(mIrisL,   WL(face, 468));
+      placeSph(mIrisR,   WL(face, 473));
+      placeSph(mNoseTip, WL(face,   4));
+      placeCyl(mMouth,   WL(face,  61), WL(face, 291));
 
       renderer.render(scene, camera);
     });
 
-    // ── resize: update orthographic frustum to match new container aspect
+    // ── resize: keep orthographic frustum matched to container aspect ratio
     const onResize = () => {
       const w = container.clientWidth;
       const h = Math.max(container.clientHeight, 1);
@@ -377,11 +333,8 @@ export function SkeletonViewport({
       renderer.dispose();
       renderer.domElement.remove();
       matL.dispose(); matR.dispose(); matC.dispose();
+      matFace.dispose(); matMouth.dispose();
       for (const m of allMeshes) m.geometry.dispose();
-      hLLines.geometry.dispose();
-      hRLines.geometry.dispose();
-      (hLLines.material as THREE.Material).dispose();
-      (hRLines.material as THREE.Material).dispose();
     };
   }, [debugLandmarksRef]);
 
