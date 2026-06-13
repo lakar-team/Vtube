@@ -303,11 +303,21 @@ export function SkeletonViewport({
       // ── face features (MediaPipe face mesh: 468 landmarks + 10 iris)
       //   468 = left iris centre, 473 = right iris centre
       //   4   = nose tip, 61/291 = mouth corners
+      //
+      //   Face mesh z-coords centre on the head interior, so the raw world_z
+      //   lands inside the opaque head sphere (r=0.045) and fails depth testing.
+      //   Fix: project features at a fixed z just in front of the head sphere.
       const face = debugLandmarksRef.current.face;
-      placeSph(mIrisL,   WL(face, 468));
-      placeSph(mIrisR,   WL(face, 473));
-      placeSph(mNoseTip, WL(face,   4));
-      placeCyl(mMouth,   WL(face,  61), WL(face, 291));
+      const faceZ = (nose?.z ?? 0) + R_HEAD + 0.01; // just past head sphere surface
+      const WF = (lms: NormalizedLandmark[] | null, i: number): THREE.Vector3 | null => {
+        const lm = lms?.[i];
+        if (!lm) return null;
+        return new THREE.Vector3(mx * (lm.x - 0.5) * asp, -(lm.y - 0.5), faceZ);
+      };
+      placeSph(mIrisL,   WF(face, 468));
+      placeSph(mIrisR,   WF(face, 473));
+      placeSph(mNoseTip, WF(face,   4));
+      placeCyl(mMouth,   WF(face,  61), WF(face, 291));
 
       renderer.render(scene, camera);
     });
