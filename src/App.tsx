@@ -269,6 +269,7 @@ export default function App() {
           <section className="pane">
             <SkeletonViewport
               debugLandmarksRef={mocap.debugLandmarksRef}
+              frameRef={mocap.frameRef}
               mirror={mirror}
             />
           </section>
