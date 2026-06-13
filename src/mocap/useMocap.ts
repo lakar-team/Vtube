@@ -10,10 +10,12 @@ import { solveMocapFrame } from "./kalidokitAdapter";
 import { FilterBank, smoothFrame } from "./smoothing";
 import {
   applyCalibration,
-  CalibrationRecorder,
+  BodySequenceRecorder,
   clearStoredCalibration,
+  FaceCalibrationRecorder,
   loadCalibration,
   saveCalibration,
+  type BodyPoseStatus,
   type CalibrationData,
   type CalibrationMode,
 } from "./calibration";
@@ -30,8 +32,12 @@ export interface MocapState {
   legsConfidence: number;
   /** Which calibration is currently capturing, if any. */
   calibrating: CalibrationMode | null;
-  /** Seconds left in the pre-capture countdown (body mode), 0 when capturing. */
-  calibrationCountdown: number;
+  /**
+   * Where the body pose sequence is (pose, countdown, capture progress).
+   * Non-null exactly while calibrating === "body". The avatar demonstrates
+   * `bodyPose.pose.demo` on screen for the user to copy.
+   */
+  bodyPose: BodyPoseStatus | null;
   faceCalibrated: boolean;
   bodyCalibrated: boolean;
 }
@@ -47,11 +53,15 @@ export interface UseMocapResult {
   /**
    * Start a calibration capture.
    * - "face": ~2 s neutral-expression capture (sit relaxed, look at camera).
-   * - "body": 3 s countdown, then ~2 s T-pose capture (stand, arms straight
-   *   out to the sides) — zeroes the body solve against the model's rest
-   *   pose and sets the hip-translation reference.
+   * - "body": guided pose sequence — the avatar demonstrates each pose
+   *   (relaxed neutral, half raise, bow), each with a countdown to get into
+   *   position and a ~2 s capture. Poses can be skipped individually.
    */
   calibrate: (mode: CalibrationMode) => void;
+  /** Skip the current pose of the body sequence. */
+  skipPose: () => void;
+  /** Abort the running calibration without saving. */
+  cancelCalibration: () => void;
   clearCalibration: () => void;
 }
 
@@ -63,7 +73,7 @@ const INITIAL_STATE: MocapState = {
   poseConfidence: 0,
   legsConfidence: 0,
   calibrating: null,
-  calibrationCountdown: 0,
+  bodyPose: null,
   faceCalibrated: false,
   bodyCalibrated: false,
 };
@@ -80,7 +90,8 @@ const INITIAL_STATE: MocapState = {
  *
  * Results are published through refs, not state — the pipeline runs at video
  * rate and must not trigger React re-renders. Only the HUD-facing summary
- * (fps/confidence/status) is committed to state, at 4 Hz.
+ * (fps/confidence/status) is committed to state, at 4 Hz, plus discrete
+ * calibration-sequence transitions (pose changes, countdown ticks at 1 Hz).
  */
 export function useMocap(
   videoRef: RefObject<HTMLVideoElement | null>,
@@ -125,7 +136,8 @@ export function useMocap(
   const runningRefRatioRef = useRef(0);
 
   const calibRef = useRef<CalibrationData | null>(null);
-  const recorderRef = useRef<CalibrationRecorder | null>(null);
+  const faceRecorderRef = useRef<FaceCalibrationRecorder | null>(null);
+  const bodyRecorderRef = useRef<BodySequenceRecorder | null>(null);
   const bankRef = useRef<FilterBank>(new FilterBank());
 
   // Restore last session's calibration (camera setups rarely move).
@@ -134,23 +146,38 @@ export function useMocap(
   }, []);
 
   const calibrate = useCallback((mode: CalibrationMode) => {
-    recorderRef.current = new CalibrationRecorder(mode, performance.now());
-    setState((s) => ({
-      ...s,
-      calibrating: mode,
-      calibrationCountdown: mode === "body" ? 3 : 0,
-    }));
+    const now = performance.now();
+    if (mode === "face") {
+      faceRecorderRef.current = new FaceCalibrationRecorder(now);
+      setState((s) => ({ ...s, calibrating: "face", bodyPose: null }));
+    } else {
+      const recorder = new BodySequenceRecorder(mirrorRef.current, now);
+      bodyRecorderRef.current = recorder;
+      setState((s) => ({ ...s, calibrating: "body", bodyPose: recorder.status(now) }));
+    }
+  }, []);
+
+  const skipPose = useCallback(() => {
+    const recorder = bodyRecorderRef.current;
+    if (recorder) recorder.skip(performance.now());
+  }, []);
+
+  const cancelCalibration = useCallback(() => {
+    faceRecorderRef.current = null;
+    bodyRecorderRef.current = null;
+    setState((s) => ({ ...s, calibrating: null, bodyPose: null }));
   }, []);
 
   const clearCalibration = useCallback(() => {
     calibRef.current = null;
-    recorderRef.current = null;
+    faceRecorderRef.current = null;
+    bodyRecorderRef.current = null;
     bankRef.current.resetAll();
     clearStoredCalibration();
     setState((s) => ({
       ...s,
       calibrating: null,
-      calibrationCountdown: 0,
+      bodyPose: null,
       faceCalibrated: false,
       bodyCalibrated: false,
     }));
@@ -166,7 +193,9 @@ export function useMocap(
     let frameCount = 0;
     let fpsWindowStart = performance.now();
     let fps = 0;
-    let lastShownCountdown = -1;
+    // Last body-pose snapshot pushed to state — only re-push on a visible
+    // change (pose index / phase / countdown second), not at video rate.
+    let lastPoseKey = "";
 
     setState((s) => ({ ...s, status: "loading", error: null }));
 
@@ -190,6 +219,21 @@ export function useMocap(
             (err instanceof Error ? err.message : String(err)),
         }));
       });
+
+    function finishCalibration(data: CalibrationData | null) {
+      if (data) {
+        calibRef.current = data;
+        saveCalibration(data);
+        bankRef.current.resetAll(); // offsets jumped; don't smooth across it
+      }
+      setState((s) => ({
+        ...s,
+        calibrating: null,
+        bodyPose: null,
+        faceCalibrated: (calibRef.current?.faceSampleCount ?? 0) > 0,
+        bodyCalibrated: calibRef.current?.body != null,
+      }));
+    }
 
     function loop() {
       if (cancelled) return;
@@ -226,6 +270,7 @@ export function useMocap(
         torsoPitchSource: torsoPitchSourceRef.current,
         refTorsoRatio:
           calibRatio > 0 ? calibRatio : runningRatio > 0 ? runningRatio : null,
+        pitchCalib: calibRef.current?.body?.pitch ?? null,
         t: nowMs / 1000,
       });
 
@@ -240,33 +285,30 @@ export function useMocap(
       debugLandmarksRef.current = debug;
 
       // --- calibration capture
-      const recorder = recorderRef.current;
-      if (recorder) {
-        const stillRecording = recorder.add(raw, nowMs);
+      const faceRecorder = faceRecorderRef.current;
+      if (faceRecorder && !faceRecorder.add(raw, nowMs)) {
+        const data = faceRecorder.finish(calibRef.current);
+        faceRecorderRef.current = null;
+        finishCalibration(data);
+      }
 
-        // Surface the body-mode countdown at 1 Hz granularity.
-        const countdown = Math.ceil(recorder.countdownLeft(nowMs));
-        if (countdown !== lastShownCountdown) {
-          lastShownCountdown = countdown;
-          setState((s) => ({ ...s, calibrationCountdown: countdown }));
-        }
-
-        if (!stillRecording) {
-          const data = recorder.finish(calibRef.current);
-          recorderRef.current = null;
-          lastShownCountdown = -1;
-          if (data) {
-            calibRef.current = data;
-            saveCalibration(data);
-            bankRef.current.resetAll(); // offsets jumped; don't smooth across it
+      const bodyRecorder = bodyRecorderRef.current;
+      if (bodyRecorder) {
+        const running = bodyRecorder.add(raw, nowMs);
+        if (!running) {
+          const data = bodyRecorder.finish(calibRef.current);
+          bodyRecorderRef.current = null;
+          lastPoseKey = "";
+          finishCalibration(data);
+        } else {
+          const status = bodyRecorder.status(nowMs);
+          const key = status
+            ? `${status.index}:${status.phase}:${status.countdown}:${Math.round(status.progress * 10)}`
+            : "";
+          if (key !== lastPoseKey) {
+            lastPoseKey = key;
+            setState((s) => ({ ...s, bodyPose: status }));
           }
-          setState((s) => ({
-            ...s,
-            calibrating: null,
-            calibrationCountdown: 0,
-            faceCalibrated: (calibRef.current?.faceSampleCount ?? 0) > 0,
-            bodyCalibrated: calibRef.current?.body != null,
-          }));
         }
       }
 
@@ -305,6 +347,8 @@ export function useMocap(
     debugLandmarksRef,
     state,
     calibrate,
+    skipPose,
+    cancelCalibration,
     clearCalibration,
   };
 }

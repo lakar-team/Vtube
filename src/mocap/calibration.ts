@@ -5,16 +5,19 @@ import {
   zeroEuler,
   zeroExpressions,
   zeroLegs,
+  type ArmKey,
   type ArmRotations,
   type EulerRotation,
   type ExpressionValues,
   type LegRotations,
   type MocapFrame,
+  type PitchCalibration,
 } from "./types";
+import { apparentSizePitchMag } from "./kalidokitAdapter";
 import { clamp } from "../utils/math";
 
 /**
- * Two-stage calibration.
+ * Calibration.
  *
  * FACE ("sit relaxed, look at the camera"): nobody sits perfectly straight
  * and centered, and no two webcams are mounted at the same angle. We record
@@ -26,40 +29,166 @@ import { clamp } from "../utils/math";
  *    e.g. if your resting face reads jawOpen = 0.15, the avatar's mouth now
  *    rests fully closed and still reaches 1.0 when you open wide.
  *
- * BODY ("stand in a T-pose, arms straight out"): solves the rest-pose
- * mismatch between you and the model. A T-pose is, by VRM spec, the model's
- * exact rest pose — so whatever the solver reports while you hold one is
- * pure bias (camera angle, lens, MediaPipe quirks, Kalidokit's built-in
- * offsets). We average it and subtract it from all subsequent body output,
- * which guarantees: you in a T-pose => avatar in its rest T-pose, and every
- * movement is measured relative to that shared reference. The captured hip
- * position also becomes the reference origin for hip translation (sway /
- * crouch / walking toward the camera), which stays disabled until a body
- * calibration provides it.
+ * BODY: a guided pose sequence. The AVATAR demonstrates each pose on screen
+ * and the user copies it; each pose has a countdown to get into position,
+ * then a ~2 s capture, and can be skipped (no room / can't hold it).
  *
- * There's a countdown before the body capture so you can step back from the
- * keyboard and strike the pose.
+ * Why no T-pose anymore: it needs arm-span room most desk users don't have,
+ * and it calibrated the WRONG neighborhood. Offsets here are an additive
+ * euler correction (out = measured - offset), which is only locally valid —
+ * Kalidokit's arm solve is highly nonlinear, so a bias measured with arms
+ * horizontal is the wrong bias for arms hanging at your sides, i.e. for the
+ * pose the user is actually in 95% of the time. That mismatch is what made
+ * the resting avatar sit "funky" even with stable tracking. The new NEUTRAL
+ * pose anchors every offset and reference (spine, hips rotation AND the hip
+ * translation origin, legs, upright torso ratio) at the user's real
+ * sitting/standing posture, so the default alignment is exact by
+ * construction; the RAISE pose adds a second arm anchor mid-range; the BOW
+ * pose measures how far each torso-pitch estimator actually swings for a
+ * known ~30° bow and stores per-user gains.
+ *
+ * Expected solver outputs per pose (EXPECTED_ARMS below) were derived from
+ * Kalidokit's calcArms source (findRotation / angleBetween3DCoords /
+ * rigArm): for a pose at drop-angle θ from horizontal, upper-arm
+ * z = ∓2.3·θ/π, y = ±(π−θ_shoulder)/π·π, x = atan2(Δx, Δz)-based. The
+ * derivation reproduces the empirically-tuned RELAXED_UPPER_ARM_Z (±1.2 vs
+ * derived ±1.15) which is the validation that the signs are right. Two
+ * channels are degenerate and excluded:
+ * - upper-arm x with arms hanging straight down (atan2(≈0, ≈0) noise) — x
+ *   offsets come from the raise pose only;
+ * - everything about arms pointed AT the camera — the image-plane projection
+ *   collapses, which is why there is no "reach forward" pose: the solver
+ *   physically can't measure it (its output for reach-forward is the same as
+ *   arms-down plus noise).
  */
 
 export const CALIBRATION_DURATION_MS = 2000;
-export const BODY_CALIBRATION_COUNTDOWN_MS = 3000;
+export const POSE_COUNTDOWN_MS = 5000;
 
 export type CalibrationMode = "face" | "body";
 
+// ---------------------------------------------------------------------------
+// Body pose sequence definitions
+
+export type BodyPoseId = "neutral" | "raise" | "bow";
+
+export interface CalibrationPoseDef {
+  id: BodyPoseId;
+  title: string;
+  instruction: string;
+  /**
+   * What the avatar demonstrates, in rig-input space (Kalidokit euler
+   * convention, the same space live mocap rotations are in before the
+   * per-model VRM0/VRM1 sign mapping — see applyMocapToVRM.rotateBone).
+   * Only sign-safe channels are used (arm z drop, spine x pitch), which
+   * render correctly on both VRM versions through the same path as live
+   * tracking.
+   */
+  demo: { spine: EulerRotation; arms: ArmRotations };
+}
+
+/** Relaxed arms-at-sides drop, rig-space (matches vrm RELAXED_UPPER_ARM_Z). */
+const RELAX_Z = 1.2;
+/** Demonstrated raise pose: arms 45° below horizontal ("gentle A"). */
+const RAISE_Z = Math.PI / 4;
+/** Demonstrated bow: ~30° forward lean (negative pitch = bowing). */
+export const BOW_DEMO_PITCH = Math.PI / 6;
+
+function demoArms(leftZ: number): ArmRotations {
+  return {
+    leftUpperArm: { x: 0, y: 0, z: leftZ },
+    leftLowerArm: zeroEuler(),
+    rightUpperArm: { x: 0, y: 0, z: -leftZ },
+    rightLowerArm: zeroEuler(),
+  };
+}
+
+export const BODY_POSE_SEQUENCE: CalibrationPoseDef[] = [
+  {
+    id: "neutral",
+    title: "Relax",
+    instruction:
+      "Sit or stand the way you normally do, arms hanging relaxed at your sides.",
+    demo: { spine: zeroEuler(), arms: demoArms(RELAX_Z) },
+  },
+  {
+    id: "raise",
+    title: "Half raise",
+    instruction:
+      "Raise both arms out and down at about 45°, like the avatar — a gentle, narrow A shape.",
+    demo: { spine: zeroEuler(), arms: demoArms(RAISE_Z) },
+  },
+  {
+    id: "bow",
+    title: "Bow",
+    instruction: "Lean your upper body forward about 30°, like the avatar.",
+    demo: { spine: { x: -BOW_DEMO_PITCH, y: 0, z: 0 }, arms: demoArms(RELAX_Z) },
+  },
+];
+
+/**
+ * Expected Kalidokit solver output per pose (mirror-mode convention; avatar
+ * sides). offset = mean(measured) - expected, so only genuine bias (camera
+ * angle, lens, solver quirks) is baked in — NOT the structural rotation of
+ * the pose itself, which must keep flowing through live.
+ * NaN marks a channel that is degenerate in that pose (excluded from the
+ * offset for that pose).
+ */
+const EXPECTED_ARMS: Record<BodyPoseId, ArmRotations | null> = {
+  neutral: {
+    // Arms hanging straight down: z = ∓2.3·(π/2)/π = ∓1.15; y = ±π/2
+    // (Kalidokit's unsigned shoulder angle, scaled); x is atan2(≈0,≈0) noise.
+    leftUpperArm: { x: NaN, y: -Math.PI / 2, z: 1.15 },
+    leftLowerArm: { x: NaN, y: 0, z: 0 },
+    rightUpperArm: { x: NaN, y: Math.PI / 2, z: -1.15 },
+    rightLowerArm: { x: NaN, y: 0, z: 0 },
+  },
+  raise: {
+    // 45° below horizontal: z = ∓2.3·(π/4)/π = ∓0.575; y = ±π/4;
+    // x = normalizeRadians(±π/2) − 0.3·invert = ∓0.2.
+    leftUpperArm: { x: -0.2, y: -Math.PI / 4, z: 0.575 },
+    leftLowerArm: { x: 0, y: 0, z: 0 },
+    rightUpperArm: { x: 0.2, y: Math.PI / 4, z: -0.575 },
+    rightLowerArm: { x: 0, y: 0, z: 0 },
+  },
+  bow: null, // arms not calibrated from the bow pose
+};
+
+/**
+ * Max magnitude (rad) of any single arm-offset channel. True camera/solver
+ * bias is small; anything bigger means the capture was off (user not in the
+ * pose, occlusion) and baking it in would distort live tracking.
+ */
+const ARM_OFFSET_LIMIT = 0.45;
+
+/** Blend weights when both arm anchors were captured: the neutral pose is
+ *  where arms live most of the time, so it dominates. */
+const NEUTRAL_ARM_WEIGHT = 0.6;
+
+// ---------------------------------------------------------------------------
+// Data model
+
 export interface BodyCalibrationData {
+  /**
+   * Spine offset (yaw/roll only — x is always 0 here; torso pitch is
+   * centered/gained inside the solver via `pitch` instead, so it is never
+   * corrected twice). Legacy v2 payloads may still carry a nonzero x with
+   * pitch == null; applyCalibration handles both.
+   */
   spine: EulerRotation;
   arms: ArmRotations;
   legs: LegRotations;
   hipsRotation: EulerRotation;
-  /** Reference standing hip position (solver units). */
+  /** Reference hip position in the user's NORMAL posture (solver units). */
   hipsPosition: { x: number; y: number; z: number };
   /**
    * Upright torso length / shoulder width (image space), the reference for
-   * the apparent-size torso-pitch (bow) estimator. 0 = not captured
-   * (pre-existing stored calibrations) — the estimator then falls back to a
-   * running max maintained by useMocap.
+   * the apparent-size torso-pitch (bow) estimator. 0 = not captured —
+   * the estimator then falls back to a running max maintained by useMocap.
    */
   torsoRatio: number;
+  /** Torso-pitch center/gains (see types.ts). null on legacy v2 payloads. */
+  pitch: PitchCalibration | null;
   legSamples: number;
   sampleCount: number;
 }
@@ -86,131 +215,323 @@ function subEuler(a: EulerRotation, b: EulerRotation): EulerRotation {
   return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
 }
 
-export class CalibrationRecorder {
-  readonly mode: CalibrationMode;
+// ---------------------------------------------------------------------------
+// Face calibration (single capture, unchanged behavior)
+
+export class FaceCalibrationRecorder {
   private samples: MocapFrame[] = [];
   private readonly startedAt: number;
-  private readonly captureStartsAt: number;
 
-  constructor(mode: CalibrationMode, nowMs: number) {
-    this.mode = mode;
+  constructor(nowMs: number) {
     this.startedAt = nowMs;
-    // Body calibration: give the user time to step back and strike the pose.
-    this.captureStartsAt =
-      nowMs + (mode === "body" ? BODY_CALIBRATION_COUNTDOWN_MS : 0);
   }
 
-  /** Seconds left before capture begins (0 once recording). */
-  countdownLeft(nowMs: number): number {
-    return Math.max(0, (this.captureStartsAt - nowMs) / 1000);
-  }
-
-  /** Returns true while still recording (or counting down). */
+  /** Returns true while still recording. */
   add(frame: MocapFrame, nowMs: number): boolean {
-    if (nowMs >= this.captureStartsAt) {
-      // Face mode needs a tracked face; body mode a tracked pose.
-      const usable = this.mode === "face" ? frame.faceTracked : frame.poseTracked;
-      if (usable) this.samples.push(frame);
-    }
-    return nowMs - this.captureStartsAt < CALIBRATION_DURATION_MS;
+    if (frame.faceTracked) this.samples.push(frame);
+    return nowMs - this.startedAt < CALIBRATION_DURATION_MS;
   }
 
   get progress(): number {
     return clamp(this.samples.length / 30, 0, 1);
   }
 
-  /**
-   * Average the captured samples into calibration data, merged over `prev`
-   * (so a face calibration doesn't wipe an earlier body calibration and vice
-   * versa). Returns null if too few usable frames were captured.
-   */
+  /** Average the capture into `prev` (keeps any body calibration). */
   finish(prev: CalibrationData | null): CalibrationData | null {
     if (this.samples.length < 10) return null; // not enough tracked frames
 
-    const out: CalibrationData = prev
-      ? { ...prev, body: prev.body }
-      : emptyCalibration();
-
-    if (this.mode === "face") {
-      const n = this.samples.length;
-      const head = zeroEuler();
-      const pupil = { x: 0, y: 0 };
-      const baseline = zeroExpressions();
-      for (const s of this.samples) {
-        head.x += s.head.x / n;
-        head.y += s.head.y / n;
-        head.z += s.head.z / n;
-        pupil.x += s.pupil.x / n;
-        pupil.y += s.pupil.y / n;
-        for (const k of ALL_EXPRESSION_KEYS) {
-          baseline[k] += s.expressions[k] / n;
-        }
-      }
-      // Blinks: a neutral baseline above ~0.4 means the user blinked during
-      // calibration or tracking is bad; don't bake that in.
-      baseline.blinkLeft = Math.min(baseline.blinkLeft, 0.4);
-      baseline.blinkRight = Math.min(baseline.blinkRight, 0.4);
-
-      out.head = head;
-      out.pupil = pupil;
-      out.expressionBaseline = baseline;
-      out.faceSampleCount = n;
-      return out;
-    }
-
-    // ---- body mode
+    const out: CalibrationData = prev ? { ...prev } : emptyCalibration();
     const n = this.samples.length;
-    const body: BodyCalibrationData = {
-      spine: zeroEuler(),
-      arms: {
-        leftUpperArm: zeroEuler(),
-        leftLowerArm: zeroEuler(),
-        rightUpperArm: zeroEuler(),
-        rightLowerArm: zeroEuler(),
-      },
-      legs: zeroLegs(),
-      hipsRotation: zeroEuler(),
-      hipsPosition: { x: 0, y: 0, z: 0 },
-      torsoRatio: 0,
-      legSamples: 0,
-      sampleCount: n,
-    };
-
-    let ratioSum = 0;
-    let ratioSamples = 0;
+    const head = zeroEuler();
+    const pupil = { x: 0, y: 0 };
+    const baseline = zeroExpressions();
     for (const s of this.samples) {
-      if (s.torsoRatio > 0) {
-        ratioSum += s.torsoRatio;
-        ratioSamples++;
+      head.x += s.head.x / n;
+      head.y += s.head.y / n;
+      head.z += s.head.z / n;
+      pupil.x += s.pupil.x / n;
+      pupil.y += s.pupil.y / n;
+      for (const k of ALL_EXPRESSION_KEYS) {
+        baseline[k] += s.expressions[k] / n;
       }
-      body.spine.x += s.spine.x / n;
-      body.spine.y += s.spine.y / n;
-      body.spine.z += s.spine.z / n;
-      body.hipsRotation.x += s.hips.rotation.x / n;
-      body.hipsRotation.y += s.hips.rotation.y / n;
-      body.hipsRotation.z += s.hips.rotation.z / n;
-      body.hipsPosition.x += s.hips.position.x / n;
-      body.hipsPosition.y += s.hips.position.y / n;
-      body.hipsPosition.z += s.hips.position.z / n;
-      for (const k of ARM_KEYS) {
-        body.arms[k].x += s.arms[k].x / n;
-        body.arms[k].y += s.arms[k].y / n;
-        body.arms[k].z += s.arms[k].z / n;
-      }
-      if (s.legsTracked) body.legSamples++;
     }
-    if (ratioSamples > 5) body.torsoRatio = ratioSum / ratioSamples;
+    // Blinks: a neutral baseline above ~0.4 means the user blinked during
+    // calibration or tracking is bad; don't bake that in.
+    baseline.blinkLeft = Math.min(baseline.blinkLeft, 0.4);
+    baseline.blinkRight = Math.min(baseline.blinkRight, 0.4);
 
-    // Legs are only zeroed against the T-pose if they were actually visible
-    // during calibration; otherwise leave leg offsets at zero.
-    if (body.legSamples > 5) {
-      for (const s of this.samples) {
-        if (!s.legsTracked) continue;
+    out.head = head;
+    out.pupil = pupil;
+    out.expressionBaseline = baseline;
+    out.faceSampleCount = n;
+    return out;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Body calibration: guided pose sequence
+
+/** Per-pose accumulated means over the capture window. */
+interface PoseCapture {
+  spine: EulerRotation;
+  arms: ArmRotations;
+  legs: LegRotations;
+  hipsRotation: EulerRotation;
+  hipsPosition: { x: number; y: number; z: number };
+  worldPitchRaw: number;
+  torsoRatio: number;
+  ratioSamples: number;
+  legSamples: number;
+  sampleCount: number;
+}
+
+function emptyPoseCapture(): PoseCapture {
+  return {
+    spine: zeroEuler(),
+    arms: {
+      leftUpperArm: zeroEuler(),
+      leftLowerArm: zeroEuler(),
+      rightUpperArm: zeroEuler(),
+      rightLowerArm: zeroEuler(),
+    },
+    legs: zeroLegs(),
+    hipsRotation: zeroEuler(),
+    hipsPosition: { x: 0, y: 0, z: 0 },
+    worldPitchRaw: 0,
+    torsoRatio: 0,
+    ratioSamples: 0,
+    legSamples: 0,
+    sampleCount: 0,
+  };
+}
+
+const MIN_POSE_SAMPLES = 10;
+
+/** UI-facing snapshot of where the sequence is. */
+export interface BodyPoseStatus {
+  index: number;
+  total: number;
+  pose: CalibrationPoseDef;
+  phase: "countdown" | "capture";
+  /** Whole seconds left in the countdown (0 while capturing). */
+  countdown: number;
+  /** Capture progress 0..1 (0 while counting down). */
+  progress: number;
+}
+
+export class BodySequenceRecorder {
+  /** Mirror mode at capture time — flips the expected arm x channel. */
+  private readonly mirror: boolean;
+  private poseIndex = 0;
+  private captureStartsAt: number;
+  private sums = new Map<BodyPoseId, PoseCapture>();
+  private current: PoseCapture = emptyPoseCapture();
+
+  constructor(mirror: boolean, nowMs: number) {
+    this.mirror = mirror;
+    this.captureStartsAt = nowMs + POSE_COUNTDOWN_MS;
+  }
+
+  status(nowMs: number): BodyPoseStatus | null {
+    const pose = BODY_POSE_SEQUENCE[this.poseIndex];
+    if (!pose) return null;
+    const countdownLeft = Math.max(0, this.captureStartsAt - nowMs);
+    return {
+      index: this.poseIndex,
+      total: BODY_POSE_SEQUENCE.length,
+      pose,
+      phase: countdownLeft > 0 ? "countdown" : "capture",
+      countdown: Math.ceil(countdownLeft / 1000),
+      progress:
+        countdownLeft > 0 ? 0 : clamp(this.current.sampleCount / 30, 0, 1),
+    };
+  }
+
+  /** Skip the rest of the current pose and move on. */
+  skip(nowMs: number): void {
+    this.advance(nowMs, /* keepCapture */ false);
+  }
+
+  private advance(nowMs: number, keepCapture: boolean): void {
+    const pose = BODY_POSE_SEQUENCE[this.poseIndex];
+    if (pose && keepCapture && this.current.sampleCount >= MIN_POSE_SAMPLES) {
+      this.sums.set(pose.id, this.current);
+    }
+    this.current = emptyPoseCapture();
+    this.poseIndex++;
+    this.captureStartsAt = nowMs + POSE_COUNTDOWN_MS;
+  }
+
+  /** Feed one RAW solved frame. Returns true while the sequence is running. */
+  add(frame: MocapFrame, nowMs: number): boolean {
+    if (this.poseIndex >= BODY_POSE_SEQUENCE.length) return false;
+    if (nowMs < this.captureStartsAt) return true; // still counting down
+
+    if (frame.poseTracked) {
+      const c = this.current;
+      c.sampleCount++;
+      const n = c.sampleCount;
+      const acc = (sum: EulerRotation, v: EulerRotation) => {
+        // Running mean: sum holds the mean so far.
+        sum.x += (v.x - sum.x) / n;
+        sum.y += (v.y - sum.y) / n;
+        sum.z += (v.z - sum.z) / n;
+      };
+      acc(c.spine, frame.spine);
+      acc(c.hipsRotation, frame.hips.rotation);
+      c.hipsPosition.x += (frame.hips.position.x - c.hipsPosition.x) / n;
+      c.hipsPosition.y += (frame.hips.position.y - c.hipsPosition.y) / n;
+      c.hipsPosition.z += (frame.hips.position.z - c.hipsPosition.z) / n;
+      for (const k of ARM_KEYS) acc(c.arms[k], frame.arms[k]);
+      c.worldPitchRaw +=
+        ((frame.spineDebug?.worldPitchRaw ?? 0) - c.worldPitchRaw) / n;
+      if (frame.torsoRatio > 0) {
+        c.ratioSamples++;
+        c.torsoRatio += (frame.torsoRatio - c.torsoRatio) / c.ratioSamples;
+      }
+      if (frame.legsTracked) {
+        c.legSamples++;
+        const m = c.legSamples;
         for (const k of LEG_KEYS) {
-          body.legs[k].x += s.legs[k].x / body.legSamples;
-          body.legs[k].y += s.legs[k].y / body.legSamples;
-          body.legs[k].z += s.legs[k].z / body.legSamples;
+          c.legs[k].x += (frame.legs[k].x - c.legs[k].x) / m;
+          c.legs[k].y += (frame.legs[k].y - c.legs[k].y) / m;
+          c.legs[k].z += (frame.legs[k].z - c.legs[k].z) / m;
         }
+      }
+    }
+
+    if (nowMs - this.captureStartsAt >= CALIBRATION_DURATION_MS) {
+      this.advance(nowMs, /* keepCapture */ true);
+    }
+    return this.poseIndex < BODY_POSE_SEQUENCE.length;
+  }
+
+  /** Expected solver arm output for a pose under the capture mirror mode. */
+  private expectedArms(id: BodyPoseId): ArmRotations | null {
+    const base = EXPECTED_ARMS[id];
+    if (!base || this.mirror) return base;
+    // mirror=false un-mirrors the solver output: sides swap and y/z negate.
+    const flip = (e: EulerRotation): EulerRotation => ({ x: e.x, y: -e.y, z: -e.z });
+    return {
+      leftUpperArm: flip(base.rightUpperArm),
+      leftLowerArm: flip(base.rightLowerArm),
+      rightUpperArm: flip(base.leftUpperArm),
+      rightLowerArm: flip(base.leftLowerArm),
+    };
+  }
+
+  /** offset = measured − expected per channel; NaN-expected channels -> NaN. */
+  private armOffsets(id: BodyPoseId): Partial<Record<ArmKey, EulerRotation>> | null {
+    const cap = this.sums.get(id);
+    const expected = this.expectedArms(id);
+    if (!cap || !expected) return null;
+    const out: Partial<Record<ArmKey, EulerRotation>> = {};
+    for (const k of ARM_KEYS) {
+      out[k] = {
+        x: Number.isNaN(expected[k].x) ? NaN : cap.arms[k].x - expected[k].x,
+        y: cap.arms[k].y - expected[k].y,
+        z: cap.arms[k].z - expected[k].z,
+      };
+    }
+    return out;
+  }
+
+  /**
+   * Assemble the captured poses into calibration data, merged over `prev`.
+   * Skipped/failed poses simply don't contribute; returns prev-equivalent
+   * data (or null) if nothing usable was captured.
+   */
+  finish(prev: CalibrationData | null): CalibrationData | null {
+    const neutral = this.sums.get("neutral") ?? null;
+    const raise = this.sums.get("raise") ?? null;
+    const bow = this.sums.get("bow") ?? null;
+    if (!neutral && !raise && !bow) return null;
+
+    const out: CalibrationData = prev ? { ...prev } : emptyCalibration();
+    let body: BodyCalibrationData | null = out.body
+      ? {
+          ...out.body,
+          spine: { ...out.body.spine },
+          arms: {
+            leftUpperArm: { ...out.body.arms.leftUpperArm },
+            leftLowerArm: { ...out.body.arms.leftLowerArm },
+            rightUpperArm: { ...out.body.arms.rightUpperArm },
+            rightLowerArm: { ...out.body.arms.rightLowerArm },
+          },
+          legs: {
+            leftUpperLeg: { ...out.body.legs.leftUpperLeg },
+            leftLowerLeg: { ...out.body.legs.leftLowerLeg },
+            rightUpperLeg: { ...out.body.legs.rightUpperLeg },
+            rightLowerLeg: { ...out.body.legs.rightLowerLeg },
+          },
+          hipsRotation: { ...out.body.hipsRotation },
+          hipsPosition: { ...out.body.hipsPosition },
+          pitch: out.body.pitch ? { ...out.body.pitch } : null,
+        }
+      : null;
+
+    // ---- neutral: every reference + the primary offsets
+    if (neutral) {
+      body = {
+        // Pitch is handled by `pitch` (center inside the solver) — x stays 0
+        // so applyCalibration never subtracts it a second time.
+        spine: { x: 0, y: neutral.spine.y, z: neutral.spine.z },
+        arms: {
+          leftUpperArm: zeroEuler(),
+          leftLowerArm: zeroEuler(),
+          rightUpperArm: zeroEuler(),
+          rightLowerArm: zeroEuler(),
+        },
+        legs: neutral.legSamples > 5 ? neutral.legs : zeroLegs(),
+        hipsRotation: neutral.hipsRotation,
+        hipsPosition: neutral.hipsPosition,
+        torsoRatio: neutral.ratioSamples > 5 ? neutral.torsoRatio : 0,
+        pitch: {
+          worldCenter: neutral.worldPitchRaw,
+          worldGain: 1,
+          sizeGain: 1,
+        },
+        legSamples: neutral.legSamples,
+        sampleCount: neutral.sampleCount,
+      };
+    } else if (body && body.pitch == null) {
+      // Legacy v2 body being refined by a partial run: its spine.x offset
+      // WAS the upright pitch reading — promote it to the solver-side center.
+      body.pitch = { worldCenter: body.spine.x, worldGain: 1, sizeGain: 1 };
+      body.spine = { ...body.spine, x: 0 };
+    }
+
+    // ---- arms: blend the available anchors
+    if (body && (neutral || raise)) {
+      const nOff = this.armOffsets("neutral");
+      const rOff = this.armOffsets("raise");
+      const lim = (v: number) =>
+        Number.isNaN(v) ? 0 : clamp(v, -ARM_OFFSET_LIMIT, ARM_OFFSET_LIMIT);
+      for (const k of ARM_KEYS) {
+        const nv = nOff?.[k];
+        const rv = rOff?.[k];
+        if (nv && rv) {
+          const w = NEUTRAL_ARM_WEIGHT;
+          body.arms[k] = {
+            // Neutral's x is degenerate (NaN) — raise is the only x source.
+            x: lim(rv.x),
+            y: lim(nv.y * w + rv.y * (1 - w)),
+            z: lim(nv.z * w + rv.z * (1 - w)),
+          };
+        } else if (nv || rv) {
+          const v = (nv ?? rv) as EulerRotation;
+          body.arms[k] = { x: lim(v.x), y: lim(v.y), z: lim(v.z) };
+        }
+      }
+    }
+
+    // ---- bow: per-user estimator gains against the known demo angle
+    if (body && body.pitch && bow) {
+      const dWorld = Math.abs(bow.worldPitchRaw - body.pitch.worldCenter);
+      body.pitch.worldGain = clamp(BOW_DEMO_PITCH / Math.max(dWorld, 0.06), 0.5, 3);
+      if (body.torsoRatio > 0.2 && bow.ratioSamples > 5 && bow.torsoRatio > 0) {
+        const magBow = apparentSizePitchMag(bow.torsoRatio, body.torsoRatio);
+        body.pitch.sizeGain = clamp(BOW_DEMO_PITCH / Math.max(magBow, 0.05), 0.5, 3);
       }
     }
 
@@ -230,8 +551,14 @@ function remapExpression(v: number, baseline: number): number {
  *
  * Always called (even with calib == null) because it also establishes the
  * hip-translation contract: `hips.position` is converted from an absolute
- * solver position into an offset from the calibrated standing reference —
+ * solver position into an offset from the calibrated reference posture —
  * and zeroed when no body calibration exists, keeping the avatar planted.
+ *
+ * NOTE: torso pitch (spine.x) is calibrated INSIDE the solver (center+gain,
+ * see kalidokitAdapter) for v3 data, where body.spine.x is stored as 0; the
+ * subtraction below is then a no-op on x. Legacy v2 data has pitch == null
+ * and a real spine.x offset, so the old subtract-the-T-pose-reading behavior
+ * still applies to it.
  */
 export function applyCalibration(
   frame: MocapFrame,
@@ -314,10 +641,12 @@ export function loadCalibration(): CalibrationData | null {
     // Minimal shape check: reject pre-v2 or corrupted payloads.
     if (typeof parsed !== "object" || parsed === null) return null;
     if (!parsed.head || !parsed.expressionBaseline) return null;
-    // Calibrations stored before the apparent-size bow estimator lack the
-    // torso ratio; 0 = "not captured" (falls back to the running max).
-    if (parsed.body && typeof parsed.body.torsoRatio !== "number") {
-      parsed.body.torsoRatio = 0;
+    if (parsed.body) {
+      // Fields added after v2 (apparent-size bow estimator, pose-sequence
+      // pitch calibration): default them so old payloads keep working —
+      // pitch == null routes spine.x through the legacy offset path.
+      if (typeof parsed.body.torsoRatio !== "number") parsed.body.torsoRatio = 0;
+      if (parsed.body.pitch === undefined) parsed.body.pitch = null;
     }
     return { ...emptyCalibration(), ...parsed };
   } catch {

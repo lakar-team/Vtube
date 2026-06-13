@@ -1,11 +1,13 @@
 import * as THREE from "three";
 import type { VRM, VRMHumanBoneName } from "@pixiv/three-vrm";
 import {
+  ARM_KEYS,
   FINGER_SEGMENTS,
   type EulerRotation,
   type HandRotations,
   type MocapFrame,
 } from "../mocap/types";
+import type { CalibrationPoseDef } from "../mocap/calibration";
 import type { ExpressionMapping } from "./expressionMap";
 
 /**
@@ -324,5 +326,59 @@ export function applyMocapToVRM(
       frame.pupil.y * GAZE_SWING.y,
       0,
     );
+  }
+}
+
+/** Ease-in speed for calibration demo poses (smooth glide, not a snap). */
+const DEMO_LERP = 0.12;
+
+/**
+ * Drive the VRM into a calibration demo pose instead of live mocap: during
+ * the body-calibration sequence the AVATAR demonstrates each target pose on
+ * screen and the user copies it. The pose is defined in the same rig-input
+ * space as live mocap rotations and goes through the identical
+ * rotateBone/sign path, so whatever the model's VRM version, the demo
+ * renders exactly the pose live tracking would produce for those values.
+ * Everything not specified by the pose eases to rest.
+ */
+export function applyDemoPoseToVRM(vrm: VRM, pose: CalibrationPoseDef): void {
+  const signs = getRotationSigns(vrm);
+
+  // Head/neck and hips rest.
+  easeBoneToward(vrm, "head", _identityQuat, DEMO_LERP);
+  easeBoneToward(vrm, "neck", _identityQuat, DEMO_LERP);
+  easeBoneToward(vrm, "hips", _identityQuat, DEMO_LERP);
+
+  // Torso: distribute the demo pitch up the spine chain like live tracking
+  // (same weights, same SPINE_PITCH_DAMP) so the user copies exactly what a
+  // real bow of that magnitude looks like.
+  _spineRot.x = pose.demo.spine.x * SPINE_PITCH_DAMP;
+  _spineRot.y = pose.demo.spine.y * SPINE_DAMP;
+  _spineRot.z = pose.demo.spine.z * SPINE_DAMP;
+  let chainWeight = 0;
+  for (const [bone, weight] of SPINE_CHAIN) {
+    if (vrm.humanoid.getNormalizedBoneNode(bone)) chainWeight += weight;
+  }
+  for (const [bone, weight] of SPINE_CHAIN) {
+    rotateBone(vrm, signs, bone, _spineRot, DEMO_LERP, weight / (chainWeight || 1));
+  }
+
+  // Arms.
+  for (const k of ARM_KEYS) {
+    rotateBone(vrm, signs, k, pose.demo.arms[k], DEMO_LERP);
+  }
+
+  // Legs, wrists, fingers rest.
+  for (const bone of LEG_BONES) {
+    easeBoneToward(vrm, bone, _identityQuat, DEMO_LERP);
+  }
+  for (const side of ["left", "right"] as const) {
+    easeBoneToward(vrm, `${side}Hand` as VRMHumanBoneName, _identityQuat, DEMO_LERP);
+    for (const segment of FINGER_SEGMENTS) {
+      const boneName = (side +
+        segment[0].toUpperCase() +
+        segment.slice(1)) as VRMHumanBoneName;
+      easeBoneToward(vrm, boneName, _identityQuat, DEMO_LERP);
+    }
   }
 }

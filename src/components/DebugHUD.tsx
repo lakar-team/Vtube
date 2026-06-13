@@ -3,7 +3,7 @@ import type { MutableRefObject } from "react";
 import type { MocapFrame } from "../mocap/types";
 import type { MocapState } from "../mocap/useMocap";
 import type { ExpressionMapping } from "../vrm/expressionMap";
-import { fmt, radToDeg } from "../utils/math";
+import { fmtFixed, radToDeg } from "../utils/math";
 
 export interface DebugHUDProps {
   state: MocapState;
@@ -32,9 +32,25 @@ interface HudSample {
   rightHandTracked: boolean;
 }
 
+/** Degrees, fixed width — readouts must never change the HUD's size. */
+function deg(rad: number | undefined): string {
+  return rad === undefined ? "     —" : fmtFixed(radToDeg(rad), 6);
+}
+
+/** 0..1 value, fixed width. */
+function val(v: number | undefined): string {
+  return v === undefined ? "   —" : v.toFixed(2).padStart(4, " ");
+}
+
 /**
  * FPS, tracking confidence, and raw-vs-smoothed channel readouts.
  * Polls the frame refs at 5 Hz instead of re-rendering at video rate.
+ *
+ * LAYOUT CONTRACT: the HUD lives in the page footer and the panes above it
+ * are sized off the leftover space, so the HUD must keep a constant size no
+ * matter what it displays. Every row/table below renders unconditionally
+ * (placeholders before the first sample), every number is fixed-width, and
+ * every variable label sits in a min-width cell (see index.css .hud-*).
  */
 export function DebugHUD({ state, rawFrameRef, frameRef, expressionMap }: DebugHUDProps) {
   const [sample, setSample] = useState<HudSample | null>(null);
@@ -66,116 +82,120 @@ export function DebugHUD({ state, rawFrameRef, frameRef, expressionMap }: DebugH
     return () => clearInterval(id);
   }, [rawFrameRef, frameRef]);
 
+  const sd = sample?.spineDebug ?? null;
+
   return (
     <div className="debug-hud">
-      <div className="hud-row">
-        <span>status</span>
-        <strong className={state.status === "error" ? "bad" : ""}>{state.status}</strong>
-        <span>mocap fps</span>
-        <strong>{state.fps}</strong>
-      </div>
-      <div className="hud-row">
-        <span>face</span>
-        <strong className={sample?.faceTracked ? "ok" : "bad"}>
-          {sample?.faceTracked ? `tracked (${state.faceConfidence.toFixed(2)})` : "lost"}
-        </strong>
-        <span>pose</span>
-        <strong className={sample?.poseTracked ? "ok" : "bad"}>
-          {sample?.poseTracked ? `tracked (${state.poseConfidence.toFixed(2)})` : "lost"}
-        </strong>
-      </div>
-      <div className="hud-row">
-        <span>arms L/R</span>
-        <strong>
-          <span className={sample?.leftArmTracked ? "ok" : "bad"}>
-            {sample?.leftArmTracked ? "ok" : "—"}
-          </span>
-          {" / "}
-          <span className={sample?.rightArmTracked ? "ok" : "bad"}>
-            {sample?.rightArmTracked ? "ok" : "—"}
-          </span>
-        </strong>
-        <span>left hand</span>
-        <strong className={sample?.leftHandTracked ? "ok" : "bad"}>
-          {sample?.leftHandTracked ? "tracked" : "lost"}
-        </strong>
-        <span>right hand</span>
-        <strong className={sample?.rightHandTracked ? "ok" : "bad"}>
-          {sample?.rightHandTracked ? "tracked" : "lost"}
-        </strong>
-        <span>legs</span>
-        <strong className={sample?.legsTracked ? "ok" : "bad"}>
-          {sample?.legsTracked ? `tracked (${state.legsConfidence.toFixed(2)})` : "out of frame"}
-        </strong>
-      </div>
-      {sample && (
-        <table className="hud-table">
-          <thead>
-            <tr>
-              <th>channel</th>
-              <th>raw</th>
-              <th>smoothed</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>head pitch / yaw / roll (deg)</td>
-              <td>
-                {fmt(radToDeg(sample.rawHead.x))} / {fmt(radToDeg(sample.rawHead.y))} /{" "}
-                {fmt(radToDeg(sample.rawHead.z))}
-              </td>
-              <td>
-                {fmt(radToDeg(sample.smHead.x))} / {fmt(radToDeg(sample.smHead.y))} /{" "}
-                {fmt(radToDeg(sample.smHead.z))}
-              </td>
-            </tr>
-            <tr>
-              <td>torso pitch / bow (deg)</td>
-              <td>{fmt(radToDeg(sample.rawSpinePitch))}</td>
-              <td>{fmt(radToDeg(sample.smSpinePitch))}</td>
-            </tr>
-            {sample.spineDebug && (
-              <tr>
-                <td>pitch est. z / size (deg)</td>
-                <td>
-                  {fmt(radToDeg(sample.spineDebug.worldPitch))} /{" "}
-                  {fmt(radToDeg(sample.spineDebug.sizePitch))}
-                </td>
-                <td>
-                  ratio {sample.spineDebug.ratio.toFixed(2)} / ref{" "}
-                  {sample.spineDebug.refRatio.toFixed(2)}
-                </td>
-              </tr>
-            )}
-            <tr>
-              <td>blink L</td>
-              <td>{sample.rawBlinkL.toFixed(2)}</td>
-              <td>{sample.smBlinkL.toFixed(2)}</td>
-            </tr>
-            <tr>
-              <td>mouth aa</td>
-              <td>{sample.rawAa.toFixed(2)}</td>
-              <td>{sample.smAa.toFixed(2)}</td>
-            </tr>
-          </tbody>
-        </table>
-      )}
-      {expressionMap && (
+      <div className="hud-col">
+        <div className="hud-row">
+          <span>status</span>
+          <strong className={`hud-cell-status ${state.status === "error" ? "bad" : ""}`}>
+            {state.status}
+          </strong>
+          <span>mocap fps</span>
+          <strong className="hud-cell-fps">{state.fps}</strong>
+        </div>
+        <div className="hud-row">
+          <span>face</span>
+          <strong className={`hud-cell-conf ${sample?.faceTracked ? "ok" : "bad"}`}>
+            {sample?.faceTracked ? `tracked (${state.faceConfidence.toFixed(2)})` : "lost"}
+          </strong>
+          <span>pose</span>
+          <strong className={`hud-cell-conf ${sample?.poseTracked ? "ok" : "bad"}`}>
+            {sample?.poseTracked ? `tracked (${state.poseConfidence.toFixed(2)})` : "lost"}
+          </strong>
+        </div>
+        <div className="hud-row">
+          <span>arms L/R</span>
+          <strong className="hud-cell-arms">
+            <span className={sample?.leftArmTracked ? "ok" : "bad"}>
+              {sample?.leftArmTracked ? "ok" : "——"}
+            </span>
+            {" / "}
+            <span className={sample?.rightArmTracked ? "ok" : "bad"}>
+              {sample?.rightArmTracked ? "ok" : "——"}
+            </span>
+          </strong>
+          <span>hands L/R</span>
+          <strong className="hud-cell-arms">
+            <span className={sample?.leftHandTracked ? "ok" : "bad"}>
+              {sample?.leftHandTracked ? "ok" : "——"}
+            </span>
+            {" / "}
+            <span className={sample?.rightHandTracked ? "ok" : "bad"}>
+              {sample?.rightHandTracked ? "ok" : "——"}
+            </span>
+          </strong>
+          <span>legs</span>
+          <strong className={`hud-cell-conf ${sample?.legsTracked ? "ok" : "bad"}`}>
+            {sample?.legsTracked
+              ? `tracked (${state.legsConfidence.toFixed(2)})`
+              : "out of frame"}
+          </strong>
+        </div>
         <div className="hud-row hud-expr-support">
           <span>blendshapes</span>
           <strong>
-            {expressionMap.map.size}/{expressionMap.total} supported
+            {expressionMap ? `${expressionMap.map.size}/${expressionMap.total} supported` : "—"}
           </strong>
         </div>
-      )}
-      {expressionMap && expressionMap.unsupported.length > 0 && (
-        <div className="hud-warning">
-          This model doesn't support {expressionMap.unsupported.length} mocap
-          channel{expressionMap.unsupported.length === 1 ? "" : "s"} (skipped):{" "}
-          {expressionMap.unsupported.join(", ")}
+      </div>
+      <table className="hud-table">
+        <thead>
+          <tr>
+            <th>channel</th>
+            <th>raw</th>
+            <th>smoothed</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>head pitch / yaw / roll (deg)</td>
+            <td className="num">
+              {deg(sample?.rawHead.x)} / {deg(sample?.rawHead.y)} / {deg(sample?.rawHead.z)}
+            </td>
+            <td className="num">
+              {deg(sample?.smHead.x)} / {deg(sample?.smHead.y)} / {deg(sample?.smHead.z)}
+            </td>
+          </tr>
+          <tr>
+            <td>torso pitch / bow (deg)</td>
+            <td className="num">{deg(sample?.rawSpinePitch)}</td>
+            <td className="num">{deg(sample?.smSpinePitch)}</td>
+          </tr>
+          <tr>
+            <td>pitch est. z / size (deg)</td>
+            <td className="num">
+              {deg(sd?.worldPitch)} / {deg(sd?.sizePitch)}
+            </td>
+            <td className="num">
+              ratio {val(sd?.ratio)} / ref {val(sd?.refRatio)}
+            </td>
+          </tr>
+          <tr>
+            <td>blink L</td>
+            <td className="num">{val(sample?.rawBlinkL)}</td>
+            <td className="num">{val(sample?.smBlinkL)}</td>
+          </tr>
+          <tr>
+            <td>mouth aa</td>
+            <td className="num">{val(sample?.rawAa)}</td>
+            <td className="num">{val(sample?.smAa)}</td>
+          </tr>
+        </tbody>
+      </table>
+      {((expressionMap && expressionMap.unsupported.length > 0) || state.error) && (
+        <div className="hud-notes">
+          {expressionMap && expressionMap.unsupported.length > 0 && (
+            <div className="hud-warning">
+              This model doesn't support {expressionMap.unsupported.length} mocap
+              channel{expressionMap.unsupported.length === 1 ? "" : "s"} (skipped):{" "}
+              {expressionMap.unsupported.join(", ")}
+            </div>
+          )}
+          {state.error && <div className="hud-error">{state.error}</div>}
         </div>
       )}
-      {state.error && <div className="hud-error">{state.error}</div>}
     </div>
   );
 }

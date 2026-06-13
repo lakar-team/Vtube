@@ -25,6 +25,10 @@ import { clamp } from "../utils/math";
  */
 export const SMOOTHING_PARAMS = {
   rotation: { minCutoff: 1.0, beta: 0.6, dCutoff: 1.0 } satisfies OneEuroParams,
+  // Torso pitch (bowing) moves the whole upper body, so resting noise here is
+  // far more visible than on any other channel — much lower cutoff than the
+  // generic rotation params, with beta still letting a deliberate bow through.
+  spinePitch: { minCutoff: 0.3, beta: 0.4, dCutoff: 1.0 } satisfies OneEuroParams,
   expression: { minCutoff: 2.0, beta: 0.8, dCutoff: 1.0 } satisfies OneEuroParams,
   pupil: { minCutoff: 0.8, beta: 0.4, dCutoff: 1.0 } satisfies OneEuroParams,
   // Fingers move fast (taps, gestures) but webcam hand landmarks are noisy —
@@ -122,6 +126,29 @@ function smoothHand(
 }
 
 /**
+ * Soft deadzone for torso pitch (bowing).
+ *
+ * Both bow estimators jitter a few degrees around upright, and the hybrid
+ * selector takes whichever magnitude is LARGER — at rest that's pure noise
+ * bias away from zero, which read as constant tiny nodding. Inside the
+ * deadzone the output is exactly 0; between the deadzone and the knee the
+ * value ramps in with a smoothstep (C1 — no pop when crossing the edge);
+ * past the knee it passes through UNTOUCHED, so a deliberate bow registers
+ * at full depth. Applied to the CALIBRATED pitch (zero = the user's actual
+ * upright), before its One Euro filter.
+ */
+export const SPINE_PITCH_DEADZONE = 0.07; // rad (~4°): pure postural sway
+export const SPINE_PITCH_KNEE = 0.22; // rad (~12.6°): clearly bowing
+
+function spinePitchDeadzone(x: number): number {
+  const m = Math.abs(x);
+  if (m <= SPINE_PITCH_DEADZONE) return 0;
+  if (m >= SPINE_PITCH_KNEE) return x;
+  const t = (m - SPINE_PITCH_DEADZONE) / (SPINE_PITCH_KNEE - SPINE_PITCH_DEADZONE);
+  return x * t * t * (3 - 2 * t);
+}
+
+/**
  * Smooth every channel of a (calibrated) mocap frame.
  * Runs between calibration and the VRM rig update.
  */
@@ -130,7 +157,16 @@ export function smoothFrame(bank: FilterBank, frame: MocapFrame): MocapFrame {
   const out: MocapFrame = {
     ...frame,
     head: smoothEuler(bank, "head", frame.head, t, SMOOTHING_PARAMS.rotation),
-    spine: smoothEuler(bank, "spine", frame.spine, t, SMOOTHING_PARAMS.rotation),
+    spine: {
+      x: bank.value(
+        "spine.x",
+        SMOOTHING_PARAMS.spinePitch,
+        spinePitchDeadzone(frame.spine.x),
+        t,
+      ),
+      y: bank.value("spine.y", SMOOTHING_PARAMS.rotation, frame.spine.y, t),
+      z: bank.value("spine.z", SMOOTHING_PARAMS.rotation, frame.spine.z, t),
+    },
     pupil: {
       x: bank.value("pupil.x", SMOOTHING_PARAMS.pupil, frame.pupil.x, t),
       y: bank.value("pupil.y", SMOOTHING_PARAMS.pupil, frame.pupil.y, t),

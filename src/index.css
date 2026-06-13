@@ -107,6 +107,32 @@ body {
   max-width: 280px;
 }
 
+/* Body-calibration pose guide (shown in place of the calibrate buttons). */
+.calib-pose {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-width: 360px;
+}
+
+.calib-pose-step {
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.calib-pose-instruction {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.calib-pose-state {
+  color: var(--ok);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .panes {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -252,6 +278,13 @@ footer {
   flex: none;
 }
 
+/*
+ * The HUD must have a CONSTANT size: it sits in the footer of a column-flex
+ * page where the panes take the leftover space, so any height change here
+ * re-lays-out (and re-renders) both viewports. Fixed height + scroll for
+ * overflow; every readout inside is fixed-width (see .hud-cell-* / .num and
+ * fmtFixed in utils/math.ts) so nothing rewraps as values change.
+ */
 .debug-hud {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -263,16 +296,48 @@ footer {
   flex-wrap: wrap;
   gap: 8px 32px;
   align-items: flex-start;
+  height: 138px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.hud-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .hud-row {
   display: flex;
   gap: 8px;
   align-items: baseline;
+  white-space: nowrap;
 }
 
 .hud-row span {
   color: var(--muted);
+}
+
+/* Min-widths sized to each cell's longest possible content, so toggling
+   between e.g. "tracked (0.95)" and "lost" never shifts the layout. */
+.hud-cell-status {
+  min-width: 7ch; /* loading / running / error / idle */
+  display: inline-block;
+}
+
+.hud-cell-fps {
+  min-width: 3ch;
+  display: inline-block;
+}
+
+.hud-cell-conf {
+  min-width: 14ch; /* "tracked (0.95)" / "out of frame" */
+  display: inline-block;
+}
+
+.hud-cell-arms {
+  min-width: 7ch; /* "ok / ok" / "—— / ——" */
+  display: inline-block;
 }
 
 .hud-table {
@@ -283,11 +348,16 @@ footer {
 .hud-table td {
   text-align: left;
   padding: 1px 14px 1px 0;
+  white-space: pre; /* fixed-width padded numbers must keep their spaces */
 }
 
 .hud-table th {
   color: var(--muted);
   font-weight: 400;
+}
+
+.hud-table td.num {
+  min-width: 9ch;
 }
 
 .ok {
@@ -298,14 +368,16 @@ footer {
   color: var(--bad);
 }
 
+.hud-notes {
+  flex-basis: 100%;
+}
+
 .hud-error {
   color: var(--bad);
-  flex-basis: 100%;
 }
 
 .hud-warning {
   color: #ffb86c;
-  flex-basis: 100%;
   font-size: 11px;
   line-height: 1.5;
 }

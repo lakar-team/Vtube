@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { WebcamView } from "./components/WebcamView";
 import { AvatarViewport, type ViewMode } from "./components/AvatarViewport";
 import { CalibrationPanel } from "./components/CalibrationPanel";
@@ -6,6 +6,7 @@ import { DebugHUD } from "./components/DebugHUD";
 import { useWebcam } from "./hooks/useWebcam";
 import { useMocap } from "./mocap/useMocap";
 import { TORSO_PITCH_SOURCES, type TorsoPitchSource } from "./mocap/types";
+import { BODY_POSE_SEQUENCE, type CalibrationPoseDef } from "./mocap/calibration";
 import type { ExpressionMapping } from "./vrm/expressionMap";
 
 const PITCH_SOURCE_KEY = "vtube.torsoPitchSource";
@@ -45,6 +46,22 @@ export default function App() {
       // privacy mode — preference just won't persist
     }
   };
+
+  // While body calibration runs, the avatar demonstrates the current pose.
+  const demoPose: CalibrationPoseDef | null = mocap.state.bodyPose?.pose ?? null;
+
+  // Dev aid: preview the calibration demo poses without a webcam/tracked
+  // body (window.__vtubeDemoPose("neutral" | "raise" | "bow" | null)).
+  const [devDemoPose, setDevDemoPose] = useState<CalibrationPoseDef | null>(null);
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    (window as unknown as Record<string, unknown>).__vtubeDemoPose = (
+      id: string | null,
+    ) => setDevDemoPose(BODY_POSE_SEQUENCE.find((p) => p.id === id) ?? null);
+    return () => {
+      delete (window as unknown as Record<string, unknown>).__vtubeDemoPose;
+    };
+  }, []);
 
   return (
     <div className="app">
@@ -107,12 +124,14 @@ export default function App() {
           </label>
           <CalibrationPanel
             calibrating={mocap.state.calibrating}
-            calibrationCountdown={mocap.state.calibrationCountdown}
+            bodyPose={mocap.state.bodyPose}
             faceCalibrated={mocap.state.faceCalibrated}
             bodyCalibrated={mocap.state.bodyCalibrated}
             faceTracked={mocap.state.faceConfidence > 0}
             poseTracked={mocap.state.poseConfidence > 0.5}
             onCalibrate={mocap.calibrate}
+            onSkipPose={mocap.skipPose}
+            onCancel={mocap.cancelCalibration}
             onClear={mocap.clearCalibration}
           />
         </div>
@@ -136,6 +155,7 @@ export default function App() {
           <AvatarViewport
             frameRef={mocap.frameRef}
             viewMode={viewMode}
+            demoPose={demoPose ?? devDemoPose}
             onExpressionMap={setExpressionMap}
           />
         </section>

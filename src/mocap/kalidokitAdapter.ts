@@ -15,6 +15,7 @@ import {
   type FingerSegment,
   type HandRotations,
   type MocapFrame,
+  type PitchCalibration,
   type TorsoPitchSource,
 } from "./types";
 import { clamp } from "../utils/math";
@@ -210,8 +211,27 @@ export interface SolveOptions {
    * estimator stays at 0.
    */
   refTorsoRatio: number | null;
+  /**
+   * Per-user bow calibration (center + gains) from the body pose sequence.
+   * null = uncalibrated: center 0, gains 1 (raw estimator output).
+   */
+  pitchCalib: PitchCalibration | null;
   /** Timestamp in seconds. */
   t: number;
+}
+
+/**
+ * Magnitude of the apparent-size (foreshortening) pitch estimate for a
+ * measured torso ratio against the upright reference, including the soft
+ * knee that keeps acos's infinite slope at 1 from turning resting jitter
+ * into degrees of pitch. Shared with calibration.ts, which inverts this
+ * mapping at the bow pose to derive the per-user size gain.
+ */
+export function apparentSizePitchMag(ratio: number, refRatio: number): number {
+  let mag = Math.acos(clamp(ratio / refRatio, 0, 1));
+  const KNEE = 0.25;
+  if (mag < KNEE) mag = (mag * mag) / KNEE;
+  return mag;
 }
 
 export interface SolveResult {
@@ -224,7 +244,7 @@ export function solveMocapFrame(
   poseResult: PoseLandmarkerResult | null,
   handResult: HandLandmarkerResult | null,
   video: HTMLVideoElement,
-  { mirror, trackLegs, torsoPitchSource, refTorsoRatio, t }: SolveOptions,
+  { mirror, trackLegs, torsoPitchSource, refTorsoRatio, pitchCalib, t }: SolveOptions,
 ): SolveResult {
   const frame = emptyFrame(t);
   const debug: DebugLandmarks = { face: null, pose: null, leftHand: null, rightHand: null };
@@ -370,11 +390,19 @@ export function solveMocapFrame(
       //    failure (no false bows while turned).
       const shoulderMid = midpoint3(poseWorld[11], poseWorld[12]);
       const hipMid = midpoint3(poseWorld[23], poseWorld[24]);
-      const worldPitch = clamp(
+      const worldPitchRaw = clamp(
         Math.atan2(
           shoulderMid.z - hipMid.z,
           Math.abs(shoulderMid.y - hipMid.y),
         ),
+        -1.6,
+        1.6,
+      );
+      // Calibration: subtract the upright reading (camera-angle bias) and
+      // scale by the measured-bow gain (monocular z compression).
+      const worldPitch = clamp(
+        (worldPitchRaw - (pitchCalib?.worldCenter ?? 0)) *
+          (pitchCalib?.worldGain ?? 1),
         -1.6,
         1.6,
       );
@@ -395,11 +423,11 @@ export function solveMocapFrame(
 
       let sizePitch = 0;
       if (refTorsoRatio && refTorsoRatio > 0.2 && frame.torsoRatio > 0) {
-        let mag = Math.acos(clamp(frame.torsoRatio / refTorsoRatio, 0, 1));
-        // acos has infinite slope at 1, so resting jitter in the ratio reads
-        // as several degrees of pitch — squash small magnitudes (soft knee).
-        const KNEE = 0.25;
-        if (mag < KNEE) mag = (mag * mag) / KNEE;
+        const mag =
+          apparentSizePitchMag(frame.torsoRatio, refTorsoRatio) *
+          (pitchCalib?.sizeGain ?? 1);
+        // Foreshortening alone can't tell forward from backward — borrow the
+        // direction from the (calibrated) world-z estimator.
         sizePitch = clamp(worldPitch <= 0 ? -mag : mag, -1.4, 1.4);
       }
 
@@ -415,6 +443,7 @@ export function solveMocapFrame(
       frame.spineDebug = {
         worldPitch,
         sizePitch,
+        worldPitchRaw,
         ratio: frame.torsoRatio,
         refRatio: refTorsoRatio ?? 0,
       };

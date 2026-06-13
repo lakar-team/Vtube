@@ -10,9 +10,10 @@ import {
   resetSkin,
   SAMPLE_SKIN_URL,
 } from "../vrm/skin";
-import { applyMocapToVRM } from "../vrm/applyMocapToVRM";
+import { applyDemoPoseToVRM, applyMocapToVRM } from "../vrm/applyMocapToVRM";
 import type { ExpressionMapping } from "../vrm/expressionMap";
 import type { MocapFrame } from "../mocap/types";
+import type { CalibrationPoseDef } from "../mocap/calibration";
 
 export type ViewMode = "bust" | "full";
 
@@ -27,6 +28,11 @@ export interface AvatarViewportProps {
   frameRef: MutableRefObject<MocapFrame | null>;
   /** Bust-up framing (face/hands detail) or full-body framing (legs). */
   viewMode?: ViewMode;
+  /**
+   * While body calibration runs, the avatar DEMONSTRATES this pose instead
+   * of following mocap, so the user can copy it. null = follow mocap.
+   */
+  demoPose?: CalibrationPoseDef | null;
   /** Called once the VRM loads with its blendshape support summary, for the
    *  debug HUD's "unsupported channels" warning. */
   onExpressionMap?: (mapping: ExpressionMapping) => void;
@@ -41,8 +47,17 @@ type LoadState =
  * Three.js viewport: renders the VRM and applies the latest mocap frame on
  * every render tick.
  */
-export function AvatarViewport({ frameRef, viewMode = "bust", onExpressionMap }: AvatarViewportProps) {
+export function AvatarViewport({
+  frameRef,
+  viewMode = "bust",
+  demoPose = null,
+  onExpressionMap,
+}: AvatarViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  // The render loop reads the demo pose through a ref so prop changes don't
+  // re-create the scene.
+  const demoPoseRef = useRef<CalibrationPoseDef | null>(demoPose);
+  demoPoseRef.current = demoPose;
   const [load, setLoad] = useState<LoadState>({ phase: "loading" });
   /** Error from a user model upload — shown without discarding the current model. */
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -181,8 +196,14 @@ export function AvatarViewport({ frameRef, viewMode = "bust", onExpressionMap }:
     renderer.setAnimationLoop(() => {
       const delta = clock.getDelta();
       if (vrm) {
-        const frame = frameRef.current;
-        if (frame) applyMocapToVRM(vrm, frame, lookAtTarget, expressionMapRef.current);
+        const demo = demoPoseRef.current;
+        if (demo) {
+          // Body calibration: demonstrate the target pose for the user.
+          applyDemoPoseToVRM(vrm, demo);
+        } else {
+          const frame = frameRef.current;
+          if (frame) applyMocapToVRM(vrm, frame, lookAtTarget, expressionMapRef.current);
+        }
         vrm.update(delta); // applies expressions, lookAt, spring bones
       }
       renderer.render(scene, camera);
