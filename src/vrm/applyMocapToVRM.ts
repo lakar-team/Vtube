@@ -185,24 +185,27 @@ function applyHand(
   side: "left" | "right",
   hand: HandRotations | null,
   wrist: EulerRotation | null,
+  fingersLerp: number,
+  fingerRelaxReturn: number,
+  wristLerp: number,
 ): void {
   for (const segment of FINGER_SEGMENTS) {
     const boneName = (side + segment[0].toUpperCase() + segment.slice(1)) as VRMHumanBoneName;
     const rot = hand?.[segment];
     if (rot) {
-      rotateBone(vrm, signs, boneName, rot, RIG_LERP.fingers);
+      rotateBone(vrm, signs, boneName, rot, fingersLerp);
     } else {
       // Hand not tracked / segment not solved: ease back to the rest pose
       // (identity in normalized bone space) instead of freezing.
-      easeBoneToward(vrm, boneName, _identityQuat, RIG_LERP.fingerRelaxReturn);
+      easeBoneToward(vrm, boneName, _identityQuat, fingerRelaxReturn);
     }
   }
 
   const wristBone = (side + "Hand") as VRMHumanBoneName;
   if (wrist) {
-    rotateBone(vrm, signs, wristBone, wrist, RIG_LERP.wrist);
+    rotateBone(vrm, signs, wristBone, wrist, wristLerp);
   } else {
-    easeBoneToward(vrm, wristBone, _identityQuat, RIG_LERP.fingerRelaxReturn);
+    easeBoneToward(vrm, wristBone, _identityQuat, fingerRelaxReturn);
   }
 }
 
@@ -212,69 +215,90 @@ function applyHand(
  *
  * @param lookAtTarget an Object3D parented to the camera; the VRM's lookAt
  *   target. We move it around to drive eye gaze.
+ * @param direct When true, all rig-layer lerps snap to 1.0 (no additional lag
+ *   beyond the smoother) and all dampening constants are removed, so the avatar
+ *   responds in real time to the mocap data.
  */
 export function applyMocapToVRM(
   vrm: VRM,
   frame: MocapFrame,
   lookAtTarget: THREE.Object3D | null,
   expressionMap?: ExpressionMapping,
+  direct = false,
 ): void {
   const signs = getRotationSigns(vrm);
 
+  // In direct mode every bone snaps to its target immediately — the smoother
+  // already handles anti-jitter, so an additional per-frame lerp only adds lag.
+  const headLerp     = direct ? 1.0 : RIG_LERP.head;
+  const bodyLerp     = direct ? 1.0 : RIG_LERP.body;
+  const hipsLerp     = direct ? 1.0 : RIG_LERP.hips;
+  const legsLerp     = direct ? 1.0 : RIG_LERP.legs;
+  const wristLerp    = direct ? 1.0 : RIG_LERP.wrist;
+  const fingersLerp  = direct ? 1.0 : RIG_LERP.fingers;
+  const relaxReturn  = direct ? 0.4  : RIG_LERP.armRelaxReturn;
+  const legRelax     = direct ? 0.4  : RIG_LERP.legRelaxReturn;
+  const fingerRelax  = direct ? 0.4  : RIG_LERP.fingerRelaxReturn;
+
+  // Dampening: direct mode passes solved rotations through at full amplitude.
+  const spinePitchDamp = direct ? 1.0 : SPINE_PITCH_DAMP;
+  const spineYZDamp    = direct ? 1.0 : SPINE_DAMP;
+  const hipsRotDamp    = direct ? 1.0 : HIPS_ROT_DAMP;
+
   // ---- head / neck (face solve)
   if (frame.faceTracked) {
-    rotateBone(vrm, signs, "head", frame.head, RIG_LERP.head, HEAD_NECK_SPLIT);
-    rotateBone(vrm, signs, "neck", frame.head, RIG_LERP.head, 1 - HEAD_NECK_SPLIT);
+    rotateBone(vrm, signs, "head", frame.head, headLerp, HEAD_NECK_SPLIT);
+    rotateBone(vrm, signs, "neck", frame.head, headLerp, 1 - HEAD_NECK_SPLIT);
   }
 
   // ---- torso + arms (pose solve)
   if (frame.poseTracked) {
-    _spineRot.x = frame.spine.x * SPINE_PITCH_DAMP;
-    _spineRot.y = frame.spine.y * SPINE_DAMP;
-    _spineRot.z = frame.spine.z * SPINE_DAMP;
+    _spineRot.x = frame.spine.x * spinePitchDamp;
+    _spineRot.y = frame.spine.y * spineYZDamp;
+    _spineRot.z = frame.spine.z * spineYZDamp;
     let chainWeight = 0;
     for (const [bone, weight] of SPINE_CHAIN) {
       if (vrm.humanoid.getNormalizedBoneNode(bone)) chainWeight += weight;
     }
     for (const [bone, weight] of SPINE_CHAIN) {
-      rotateBone(vrm, signs, bone, _spineRot, RIG_LERP.body, weight / (chainWeight || 1));
+      rotateBone(vrm, signs, bone, _spineRot, bodyLerp, weight / (chainWeight || 1));
     }
-    rotateBone(vrm, signs, "hips", frame.hips.rotation, RIG_LERP.hips, HIPS_ROT_DAMP);
+    rotateBone(vrm, signs, "hips", frame.hips.rotation, hipsLerp, hipsRotDamp);
     // Arms gate individually: a hand shoved at the lens occludes its own arm
     // and MediaPipe hallucinates the hidden joints — that side eases to the
     // relaxed pose while the visible arm keeps tracking.
     if (frame.armsTracked.left) {
-      rotateBone(vrm, signs, "leftUpperArm", frame.arms.leftUpperArm, RIG_LERP.body);
-      rotateBone(vrm, signs, "leftLowerArm", frame.arms.leftLowerArm, RIG_LERP.body);
+      rotateBone(vrm, signs, "leftUpperArm", frame.arms.leftUpperArm, bodyLerp);
+      rotateBone(vrm, signs, "leftLowerArm", frame.arms.leftLowerArm, bodyLerp);
     } else {
-      relaxArm(vrm, signs, "left", RIG_LERP.armRelaxReturn);
+      relaxArm(vrm, signs, "left", relaxReturn);
     }
     if (frame.armsTracked.right) {
-      rotateBone(vrm, signs, "rightUpperArm", frame.arms.rightUpperArm, RIG_LERP.body);
-      rotateBone(vrm, signs, "rightLowerArm", frame.arms.rightLowerArm, RIG_LERP.body);
+      rotateBone(vrm, signs, "rightUpperArm", frame.arms.rightUpperArm, bodyLerp);
+      rotateBone(vrm, signs, "rightLowerArm", frame.arms.rightLowerArm, bodyLerp);
     } else {
-      relaxArm(vrm, signs, "right", RIG_LERP.armRelaxReturn);
+      relaxArm(vrm, signs, "right", relaxReturn);
     }
   } else {
     // No pose: ease the arms down to a natural resting pose and straighten
     // the torso instead of freezing mid-bend.
-    relaxArm(vrm, signs, "left", RIG_LERP.armRelaxReturn);
-    relaxArm(vrm, signs, "right", RIG_LERP.armRelaxReturn);
+    relaxArm(vrm, signs, "left", relaxReturn);
+    relaxArm(vrm, signs, "right", relaxReturn);
     for (const [bone] of SPINE_CHAIN) {
-      easeBoneToward(vrm, bone, _identityQuat, RIG_LERP.armRelaxReturn);
+      easeBoneToward(vrm, bone, _identityQuat, relaxReturn);
     }
   }
 
   // ---- legs (pose solve, gated on lower-body visibility)
   if (frame.legsTracked) {
-    rotateBone(vrm, signs, "leftUpperLeg", frame.legs.leftUpperLeg, RIG_LERP.legs);
-    rotateBone(vrm, signs, "leftLowerLeg", frame.legs.leftLowerLeg, RIG_LERP.legs);
-    rotateBone(vrm, signs, "rightUpperLeg", frame.legs.rightUpperLeg, RIG_LERP.legs);
-    rotateBone(vrm, signs, "rightLowerLeg", frame.legs.rightLowerLeg, RIG_LERP.legs);
+    rotateBone(vrm, signs, "leftUpperLeg", frame.legs.leftUpperLeg, legsLerp);
+    rotateBone(vrm, signs, "leftLowerLeg", frame.legs.leftLowerLeg, legsLerp);
+    rotateBone(vrm, signs, "rightUpperLeg", frame.legs.rightUpperLeg, legsLerp);
+    rotateBone(vrm, signs, "rightLowerLeg", frame.legs.rightLowerLeg, legsLerp);
   } else {
     // Legs out of frame / disabled: ease back to standing (identity).
     for (const bone of LEG_BONES) {
-      easeBoneToward(vrm, bone, _identityQuat, RIG_LERP.legRelaxReturn);
+      easeBoneToward(vrm, bone, _identityQuat, legRelax);
     }
   }
 
@@ -303,7 +327,7 @@ export function applyMocapToVRM(
         rest.y + clampAbs(p.y * HIPS_POS_SCALE.y, HIPS_POS_LIMIT.y),
         rest.z + clampAbs(p.z * HIPS_POS_SCALE.z, HIPS_POS_LIMIT.z) * -signs.z,
       );
-      node.position.lerp(_vec3, RIG_LERP.hips);
+      node.position.lerp(_vec3, hipsLerp);
     }
   }
 
@@ -316,8 +340,8 @@ export function applyMocapToVRM(
   }
 
   // ---- fingers + wrists (hand solve)
-  applyHand(vrm, signs, "left", frame.hands.left, frame.hands.leftWrist);
-  applyHand(vrm, signs, "right", frame.hands.right, frame.hands.rightWrist);
+  applyHand(vrm, signs, "left",  frame.hands.left,  frame.hands.leftWrist,  fingersLerp, fingerRelax, wristLerp);
+  applyHand(vrm, signs, "right", frame.hands.right, frame.hands.rightWrist, fingersLerp, fingerRelax, wristLerp);
 
   // ---- eye gaze via lookAt target
   if (lookAtTarget && frame.faceTracked) {

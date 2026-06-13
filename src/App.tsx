@@ -10,6 +10,7 @@ import { BODY_POSE_SEQUENCE, type CalibrationPoseDef } from "./mocap/calibration
 import type { ExpressionMapping } from "./vrm/expressionMap";
 
 const PITCH_SOURCE_KEY = "vtube.torsoPitchSource";
+const DIRECT_MODE_KEY = "vtube.directMode";
 
 function loadPitchSource(): TorsoPitchSource {
   try {
@@ -17,6 +18,16 @@ function loadPitchSource(): TorsoPitchSource {
     return v && TORSO_PITCH_SOURCES.includes(v) ? v : "hybrid";
   } catch {
     return "hybrid";
+  }
+}
+
+function loadDirectMode(): boolean {
+  try {
+    const v = localStorage.getItem(DIRECT_MODE_KEY);
+    // Default to true — direct mode is the new intended experience.
+    return v === null ? true : v === "1";
+  } catch {
+    return true;
   }
 }
 
@@ -28,6 +39,7 @@ export default function App() {
   const [trackLegs, setTrackLegs] = useState(true);
   const [viewMode, setViewMode] = useState<ViewMode>("full");
   const [torsoPitchSource, setTorsoPitchSource] = useState<TorsoPitchSource>(loadPitchSource);
+  const [directMode, setDirectMode] = useState<boolean>(loadDirectMode);
   const [expressionMap, setExpressionMap] = useState<ExpressionMapping | null>(null);
 
   const webcam = useWebcam(videoRef);
@@ -36,7 +48,13 @@ export default function App() {
     trackLegs,
     torsoPitchSource,
     enabled: webcam.ready,
+    directMode,
   });
+
+  const changeDirectMode = (v: boolean) => {
+    setDirectMode(v);
+    try { localStorage.setItem(DIRECT_MODE_KEY, v ? "1" : "0"); } catch { /* privacy mode */ }
+  };
 
   const changePitchSource = (v: TorsoPitchSource) => {
     setTorsoPitchSource(v);
@@ -134,6 +152,21 @@ export default function App() {
           <label
             className="toggle"
             title={
+              "Tracking mode:\n" +
+              "• direct — avatar responds in real time, 1:1 with mocap (may jitter with poor lighting)\n" +
+              "• stabilized — filters + slew limits smooth out jitter at the cost of some lag"
+            }
+          >
+            <input
+              type="checkbox"
+              checked={directMode}
+              onChange={(e) => changeDirectMode(e.target.checked)}
+            />
+            direct
+          </label>
+          <label
+            className="toggle"
+            title={
               "How torso pitch (bowing) is estimated:\n" +
               "• mediapipe z — depth from MediaPipe's 3D estimate (direct, but underreads deep bows)\n" +
               "• apparent size — torso foreshortening in the image (robust, needs body calibration or a moment standing upright)\n" +
@@ -185,6 +218,7 @@ export default function App() {
             viewMode={viewMode}
             demoPose={demoPose ?? devDemoPose}
             onExpressionMap={setExpressionMap}
+            directMode={directMode}
           />
         </section>
       </main>

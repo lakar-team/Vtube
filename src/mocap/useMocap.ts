@@ -7,7 +7,7 @@ import type {
 } from "@mediapipe/tasks-vision";
 import { createLandmarkers, type Landmarkers } from "./landmarkers";
 import { solveMocapFrame } from "./kalidokitAdapter";
-import { FilterBank, smoothFrame } from "./smoothing";
+import { directSmoothFrame, FilterBank, smoothFrame } from "./smoothing";
 import {
   applyCalibration,
   BodySequenceRecorder,
@@ -100,6 +100,7 @@ export function useMocap(
     trackLegs: boolean;
     torsoPitchSource: TorsoPitchSource;
     enabled: boolean;
+    directMode: boolean;
   },
 ): UseMocapResult {
   const frameRef = useRef<MocapFrame | null>(null);
@@ -127,6 +128,8 @@ export function useMocap(
   trackLegsRef.current = options.trackLegs;
   const torsoPitchSourceRef = useRef(options.torsoPitchSource);
   torsoPitchSourceRef.current = options.torsoPitchSource;
+  const directModeRef = useRef(options.directMode);
+  directModeRef.current = options.directMode;
 
   // Fallback upright reference for the apparent-size bow estimator when no
   // body calibration captured one: a slow-decaying running max of the
@@ -312,9 +315,11 @@ export function useMocap(
         }
       }
 
-      // --- calibrate, then smooth
+      // --- calibrate, then smooth (direct mode: near-passthrough filter, no slew limits)
       const calibrated = applyCalibration(raw, calibRef.current);
-      frameRef.current = smoothFrame(bankRef.current, calibrated);
+      frameRef.current = directModeRef.current
+        ? directSmoothFrame(bankRef.current, calibrated)
+        : smoothFrame(bankRef.current, calibrated);
 
       // --- fps + HUD state at 4 Hz
       frameCount++;

@@ -40,6 +40,22 @@ export const SMOOTHING_PARAMS = {
 };
 
 /**
+ * Direct-mode smoothing: near-passthrough One Euro filter that only suppresses
+ * true single-frame landmark teleports (physically impossible jumps from
+ * MediaPipe when a hand occludes its arm). Fast motion passes untouched.
+ * At 30 fps (dt≈0.033 s), minCutoff=15 gives alpha≈0.76 — still responsive,
+ * not frame-locked to previous value.
+ */
+export const DIRECT_SMOOTHING_PARAMS = {
+  rotation: { minCutoff: 15.0, beta: 2.0, dCutoff: 1.0 } satisfies OneEuroParams,
+  spinePitch: { minCutoff: 8.0, beta: 1.5, dCutoff: 1.0 } satisfies OneEuroParams,
+  expression: { minCutoff: 4.0, beta: 1.5, dCutoff: 1.0 } satisfies OneEuroParams,
+  pupil: { minCutoff: 3.0, beta: 0.8, dCutoff: 1.0 } satisfies OneEuroParams,
+  finger: { minCutoff: 15.0, beta: 2.0, dCutoff: 1.0 } satisfies OneEuroParams,
+  hipsPosition: { minCutoff: 5.0, beta: 1.0, dCutoff: 1.0 } satisfies OneEuroParams,
+};
+
+/**
  * Max angular speed (rad/s) let through per channel, applied AFTER the One
  * Euro filters. One Euro is built to let fast motion through (that's its
  * selling point), which is exactly wrong for the single-frame spikes
@@ -120,13 +136,14 @@ function smoothHand(
   side: "left" | "right",
   hand: HandRotations | null,
   t: number,
+  params = SMOOTHING_PARAMS.finger,
 ): HandRotations | null {
   if (!hand) return null;
   const out: HandRotations = {};
   for (const segment of FINGER_SEGMENTS) {
     const rot = hand[segment];
     if (!rot) continue;
-    out[segment] = smoothEuler(bank, `hand.${side}.${segment}`, rot, t, SMOOTHING_PARAMS.finger);
+    out[segment] = smoothEuler(bank, `hand.${side}.${segment}`, rot, t, params);
   }
   return out;
 }
@@ -255,4 +272,71 @@ function slewEuler(
     y: bank.slew(`${key}.y`, e.y, t, maxRate),
     z: bank.slew(`${key}.z`, e.z, t, maxRate),
   };
+}
+
+/**
+ * Direct-mode smoother: near-passthrough One Euro (kills only true outlier
+ * spikes from MediaPipe landmark teleports). No slew limits, no spine deadzone.
+ * The rig layer (applyMocapToVRM with direct=true) also removes all per-frame
+ * lerp lag and dampening constants so the avatar responds in real time.
+ */
+export function directSmoothFrame(bank: FilterBank, frame: MocapFrame): MocapFrame {
+  const t = frame.t;
+  const R = DIRECT_SMOOTHING_PARAMS.rotation;
+  const out: MocapFrame = {
+    ...frame,
+    head: smoothEuler(bank, "head", frame.head, t, R),
+    spine: {
+      // No deadzone — small bows pass through unmodified.
+      x: bank.value("spine.x", DIRECT_SMOOTHING_PARAMS.spinePitch, frame.spine.x, t),
+      y: bank.value("spine.y", R, frame.spine.y, t),
+      z: bank.value("spine.z", R, frame.spine.z, t),
+    },
+    pupil: {
+      x: bank.value("pupil.x", DIRECT_SMOOTHING_PARAMS.pupil, frame.pupil.x, t),
+      y: bank.value("pupil.y", DIRECT_SMOOTHING_PARAMS.pupil, frame.pupil.y, t),
+    },
+    expressions: { ...frame.expressions },
+    arms: { ...frame.arms },
+    legs: { ...frame.legs },
+    hips: {
+      rotation: smoothEuler(bank, "hips.rot", frame.hips.rotation, t, R),
+      position: {
+        x: bank.value("hips.pos.x", DIRECT_SMOOTHING_PARAMS.hipsPosition, frame.hips.position.x, t),
+        y: bank.value("hips.pos.y", DIRECT_SMOOTHING_PARAMS.hipsPosition, frame.hips.position.y, t),
+        z: bank.value("hips.pos.z", DIRECT_SMOOTHING_PARAMS.hipsPosition, frame.hips.position.z, t),
+      },
+    },
+    hands: { ...frame.hands },
+  };
+
+  for (const k of ALL_EXPRESSION_KEYS) {
+    out.expressions[k] = bank.value(
+      `expr.${k}`,
+      DIRECT_SMOOTHING_PARAMS.expression,
+      frame.expressions[k],
+      t,
+    );
+  }
+
+  // No slew limits — just the near-passthrough One Euro filter.
+  for (const k of ARM_KEYS) {
+    out.arms[k] = smoothEuler(bank, `arm.${k}`, frame.arms[k], t, R);
+  }
+
+  for (const k of LEG_KEYS) {
+    out.legs[k] = smoothEuler(bank, `leg.${k}`, frame.legs[k], t, R);
+  }
+
+  out.hands.left = smoothHand(bank, "left", frame.hands.left, t, DIRECT_SMOOTHING_PARAMS.finger);
+  out.hands.right = smoothHand(bank, "right", frame.hands.right, t, DIRECT_SMOOTHING_PARAMS.finger);
+  // Wrists: no slew limit in direct mode — full responsiveness.
+  out.hands.leftWrist = frame.hands.leftWrist
+    ? smoothEuler(bank, "wrist.left", frame.hands.leftWrist, t, R)
+    : null;
+  out.hands.rightWrist = frame.hands.rightWrist
+    ? smoothEuler(bank, "wrist.right", frame.hands.rightWrist, t, R)
+    : null;
+
+  return out;
 }

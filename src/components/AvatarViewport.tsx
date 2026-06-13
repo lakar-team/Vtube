@@ -36,6 +36,11 @@ export interface AvatarViewportProps {
   /** Called once the VRM loads with its blendshape support summary, for the
    *  debug HUD's "unsupported channels" warning. */
   onExpressionMap?: (mapping: ExpressionMapping) => void;
+  /**
+   * Direct mode: rig lerps snap to 1.0 and dampening is removed so the avatar
+   * responds instantly to mocap. Toggle with the "direct" checkbox.
+   */
+  directMode?: boolean;
 }
 
 type LoadState =
@@ -52,12 +57,14 @@ export function AvatarViewport({
   viewMode = "bust",
   demoPose = null,
   onExpressionMap,
+  directMode = false,
 }: AvatarViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  // The render loop reads the demo pose through a ref so prop changes don't
-  // re-create the scene.
+  // The render loop reads these through refs so prop changes don't re-create the scene.
   const demoPoseRef = useRef<CalibrationPoseDef | null>(demoPose);
   demoPoseRef.current = demoPose;
+  const directModeRef = useRef(directMode);
+  directModeRef.current = directMode;
   const [load, setLoad] = useState<LoadState>({ phase: "loading" });
   /** Error from a user model upload — shown without discarding the current model. */
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -202,7 +209,7 @@ export function AvatarViewport({
           applyDemoPoseToVRM(vrm, demo);
         } else {
           const frame = frameRef.current;
-          if (frame) applyMocapToVRM(vrm, frame, lookAtTarget, expressionMapRef.current);
+          if (frame) applyMocapToVRM(vrm, frame, lookAtTarget, expressionMapRef.current, directModeRef.current);
         }
         vrm.update(delta); // applies expressions, lookAt, spring bones
       }
