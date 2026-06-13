@@ -77,8 +77,14 @@ const LOWER_BODY_POSE_INDICES = [23, 24, 25, 26, 27, 28] as const; // hips/knees
 /** Min mean visibility of hips/knees/ankles before we trust leg solving. */
 const LEG_VISIBILITY_THRESHOLD = 0.6;
 
-/** Min mean visibility of one arm's shoulder/elbow/wrist to drive that arm. */
-const ARM_VISIBILITY_THRESHOLD = 0.55;
+/**
+ * Min weighted visibility score for one arm's shoulder/elbow/wrist chain to
+ * drive that arm. Shoulder and elbow dominate (0.5/0.35); wrist contributes
+ * only 0.15 so a wrist occluded at face level can't disable the whole arm.
+ * Lowered from 0.55 so extreme arm positions (raised to face, behind head)
+ * don't drop out when the wrist landmark has reduced visibility.
+ */
+const ARM_VISIBILITY_THRESHOLD = 0.40;
 
 /**
  * Max image-space distance (in image-height units, aspect-corrected) between
@@ -451,11 +457,13 @@ export function solveMocapFrame(
       // Per-arm gating (see types.ts). Mirror convention: frame.arms.left*
       // is solved from the subject's RIGHT arm landmarks (12/14/16) and
       // vice versa, so the gates pair up the same way.
+      // Weighted: shoulder 0.50, elbow 0.35, wrist 0.15. The wrist is often
+      // occluded when the arm is raised to face height or behind the head;
+      // giving it only 15% weight keeps the arm tracked from shoulder+elbow.
       const armVis = (s: number, e: number, w: number) =>
-        ((poseImage[s]?.visibility ?? 0) +
-          (poseImage[e]?.visibility ?? 0) +
-          (poseImage[w]?.visibility ?? 0)) /
-        3;
+        (poseImage[s]?.visibility ?? 0) * 0.50 +
+        (poseImage[e]?.visibility ?? 0) * 0.35 +
+        (poseImage[w]?.visibility ?? 0) * 0.15;
       frame.armsTracked = {
         left: armVis(12, 14, 16) > ARM_VISIBILITY_THRESHOLD,
         right: armVis(11, 13, 15) > ARM_VISIBILITY_THRESHOLD,
@@ -520,8 +528,11 @@ export function solveMocapFrame(
     const aspect = (video.videoWidth || 640) / (video.videoHeight || 480);
     const poseWristL = poseImage?.[15]; // subject's anatomical LEFT wrist
     const poseWristR = poseImage?.[16]; // subject's anatomical RIGHT wrist
+    // Lower threshold (was 0.5): when the arm is raised, the pose wrist
+    // landmark near the face often has reduced visibility; still usable as an
+    // anchor for side-matching even at moderate confidence.
     const usable = (p: NormalizedLandmark | undefined) =>
-      frame.poseTracked && p != null && (p.visibility ?? 0) > 0.5 ? p : null;
+      frame.poseTracked && p != null && (p.visibility ?? 0) > 0.35 ? p : null;
     const anchorL = usable(poseWristL);
     const anchorR = usable(poseWristR);
 

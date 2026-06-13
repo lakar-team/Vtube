@@ -45,12 +45,18 @@ export const SMOOTHING_PARAMS = {
  * selling point), which is exactly wrong for the single-frame spikes
  * MediaPipe produces when a hand near the lens occludes its own arm — a
  * 90°-in-one-frame arm snap is never real motion. The limits are high enough
- * that genuine fast gestures (a full arm swing in ~a quarter second) pass
- * untouched; only physically impossible jumps get spread over a few frames.
+ * that genuine fast gestures pass untouched; only physically impossible jumps
+ * get spread over a few frames.
+ *
+ * Previous values (arm: 9, wrist: 11) capped a quick 90° arm lift (1.57 rad)
+ * at only 1.57 / 9 * 30fps = 5 frames = 167ms of artificial lag. Raised to
+ * allow a fast arm-to-face raise (~1.5 rad in ~0.15s = 10 rad/s real) through
+ * cleanly. A genuine MediaPipe spike (90° in one frame at 30fps = 47 rad/s)
+ * is still capped well below the limit.
  */
 export const SLEW_LIMITS = {
-  arm: 9,
-  wrist: 11,
+  arm: 15,
+  wrist: 18,
 } as const;
 
 /**
