@@ -206,8 +206,13 @@ body {
   min-height: 0;
 }
 
+.panes.panes-three {
+  grid-template-columns: 1fr 1fr 1fr;
+}
+
 @media (max-width: 900px) {
-  .panes {
+  .panes,
+  .panes.panes-three {
     grid-template-columns: 1fr;
   }
 }

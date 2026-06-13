@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { WebcamView } from "./components/WebcamView";
 import { AvatarViewport, type ViewMode } from "./components/AvatarViewport";
+import { SkeletonViewport } from "./components/SkeletonViewport";
 import { CalibrationPanel } from "./components/CalibrationPanel";
 import { DebugHUD } from "./components/DebugHUD";
 import { useWebcam } from "./hooks/useWebcam";
@@ -8,6 +9,9 @@ import { useMocap } from "./mocap/useMocap";
 import { TORSO_PITCH_SOURCES, type TorsoPitchSource } from "./mocap/types";
 import { BODY_POSE_SEQUENCE, type CalibrationPoseDef } from "./mocap/calibration";
 import type { ExpressionMapping } from "./vrm/expressionMap";
+
+type DisplayMode = "avatar" | "skeleton" | "both";
+const DISPLAY_MODE_KEY = "vtube.displayMode";
 
 const PITCH_SOURCE_KEY = "vtube.torsoPitchSource";
 const DIRECT_MODE_KEY = "vtube.directMode";
@@ -31,6 +35,15 @@ function loadDirectMode(): boolean {
   }
 }
 
+function loadDisplayMode(): DisplayMode {
+  try {
+    const v = localStorage.getItem(DISPLAY_MODE_KEY) as DisplayMode | null;
+    return v === "avatar" || v === "skeleton" || v === "both" ? v : "avatar";
+  } catch {
+    return "avatar";
+  }
+}
+
 export default function App() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
@@ -40,6 +53,7 @@ export default function App() {
   const [viewMode, setViewMode] = useState<ViewMode>("full");
   const [torsoPitchSource, setTorsoPitchSource] = useState<TorsoPitchSource>(loadPitchSource);
   const [directMode, setDirectMode] = useState<boolean>(loadDirectMode);
+  const [displayMode, setDisplayMode] = useState<DisplayMode>(loadDisplayMode);
   const [expressionMap, setExpressionMap] = useState<ExpressionMapping | null>(null);
 
   const webcam = useWebcam(videoRef);
@@ -54,6 +68,11 @@ export default function App() {
   const changeDirectMode = (v: boolean) => {
     setDirectMode(v);
     try { localStorage.setItem(DIRECT_MODE_KEY, v ? "1" : "0"); } catch { /* privacy mode */ }
+  };
+
+  const changeDisplayMode = (v: DisplayMode) => {
+    setDisplayMode(v);
+    try { localStorage.setItem(DISPLAY_MODE_KEY, v); } catch { /* privacy mode */ }
   };
 
   const changePitchSource = (v: TorsoPitchSource) => {
@@ -183,6 +202,28 @@ export default function App() {
               <option value="z">mediapipe z</option>
             </select>
           </label>
+          <label
+            className="toggle"
+            title={
+              "Which view to show in the right pane:\n" +
+              "• avatar — VRM avatar driven by retargeted mocap\n" +
+              "• skeleton — raw MediaPipe landmark positions (no retargeting)\n" +
+              "• both — avatar + skeleton side by side for direct comparison\n\n" +
+              "If the skeleton moves correctly but the avatar doesn't, the issue is in\n" +
+              "the retargeting layer. If both look wrong, the issue is upstream in\n" +
+              "landmark capture or smoothing."
+            }
+          >
+            view
+            <select
+              value={displayMode}
+              onChange={(e) => changeDisplayMode(e.target.value as DisplayMode)}
+            >
+              <option value="avatar">avatar</option>
+              <option value="skeleton">skeleton</option>
+              <option value="both">both</option>
+            </select>
+          </label>
           <CalibrationPanel
             calibrating={mocap.state.calibrating}
             bodyPose={mocap.state.bodyPose}
@@ -198,7 +239,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="panes">
+      <main className={`panes${displayMode === "both" ? " panes-three" : ""}`}>
         <section className="pane">
           <WebcamView
             videoRef={videoRef}
@@ -212,15 +253,26 @@ export default function App() {
           )}
         </section>
 
-        <section className="pane">
-          <AvatarViewport
-            frameRef={mocap.frameRef}
-            viewMode={viewMode}
-            demoPose={demoPose ?? devDemoPose}
-            onExpressionMap={setExpressionMap}
-            directMode={directMode}
-          />
-        </section>
+        {(displayMode === "avatar" || displayMode === "both") && (
+          <section className="pane">
+            <AvatarViewport
+              frameRef={mocap.frameRef}
+              viewMode={viewMode}
+              demoPose={demoPose ?? devDemoPose}
+              onExpressionMap={setExpressionMap}
+              directMode={directMode}
+            />
+          </section>
+        )}
+
+        {(displayMode === "skeleton" || displayMode === "both") && (
+          <section className="pane">
+            <SkeletonViewport
+              debugLandmarksRef={mocap.debugLandmarksRef}
+              mirror={mirror}
+            />
+          </section>
+        )}
       </main>
 
       <footer>
