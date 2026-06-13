@@ -200,51 +200,52 @@ export const BODY_POSE_SEQUENCE: CalibrationPoseDef[] = [
 ];
 
 /**
- * Expected Kalidokit solver output per pose (mirror-mode convention; avatar
- * sides). offset = mean(measured) - expected, so only genuine bias (camera
- * angle, lens, solver quirks) is baked in — NOT the structural rotation of
- * the pose itself, which must keep flowing through live.
+ * Expected arm solver output per pose after the kalidokitAdapter corrections
+ * (mirror-mode convention; avatar sides).
+ * offset = mean(measured) - expected, so only genuine bias (camera angle,
+ * lens, solver quirks) is baked in — NOT the structural rotation of the pose
+ * itself, which must keep flowing through live.
  * NaN marks a channel that is degenerate in that pose (excluded from the
  * offset for that pose).
  *
- * Formula recap (from Kalidokit calcArms source):
- *   upperArm.z = ∓2.3·θ/π   (θ = drop angle below horizontal; left=+, right=−)
- *   upperArm.y = ∓θ          (same sign convention as z)
+ * Formula recap (after kalidokitAdapter's sign fix on z):
+ *   upperArm.z = ±2.3·θ/π   (θ = drop angle below horiz; left=+, right=−)
+ *   upperArm.y = 0           (angleBetween3DCoords y is zeroed in the adapter)
  *   upperArm.x = atan2-based; only non-degenerate when arm is not pointing straight up/down.
  */
 const EXPECTED_ARMS: Record<BodyPoseId, ArmRotations | null> = {
   neutral: {
     // Arms hanging straight down: θ = π/2
-    // z = ∓2.3·(π/2)/π = ∓1.15; y = ∓π/2; x is atan2(≈0,≈0) noise.
-    leftUpperArm:  { x: NaN, y: -Math.PI / 2, z: 1.15 },
+    // z = ±2.3·(π/2)/π = ±1.15; y = 0; x is atan2(≈0,≈0) noise.
+    leftUpperArm:  { x: NaN, y: 0, z: 1.15 },
     leftLowerArm:  { x: NaN, y: 0, z: 0 },
-    rightUpperArm: { x: NaN, y: Math.PI / 2, z: -1.15 },
+    rightUpperArm: { x: NaN, y: 0, z: -1.15 },
     rightLowerArm: { x: NaN, y: 0, z: 0 },
   },
   raise: {
     // 45° below horizontal: θ = π/4
-    // z = ∓2.3·(π/4)/π = ∓0.575; y = ∓π/4; x = ∓0.2.
-    leftUpperArm:  { x: -0.2, y: -Math.PI / 4, z: 0.575 },
+    // z = ±2.3·(π/4)/π = ±0.575; y = 0; x = ∓0.2.
+    leftUpperArm:  { x: -0.2, y: 0, z: 0.575 },
     leftLowerArm:  { x: 0, y: 0, z: 0 },
-    rightUpperArm: { x: 0.2, y: Math.PI / 4, z: -0.575 },
+    rightUpperArm: { x: 0.2, y: 0, z: -0.575 },
     rightLowerArm: { x: 0, y: 0, z: 0 },
   },
   bow: null,  // arms not calibrated from the bow pose
   hips: {
     // Upper arms near horizontal (θ ≈ π/6, ~30° below horizontal).
-    // z = ∓2.3·(π/6)/π ≈ ∓0.383; y = ∓π/6 ≈ ∓0.524.
+    // z = ±2.3·(π/6)/π ≈ ±0.383; y = 0.
     // Lower arm is bent at the elbow — degenerate for calibration purposes.
-    leftUpperArm:  { x: NaN, y: -Math.PI / 6, z: 0.383 },
+    leftUpperArm:  { x: NaN, y: 0, z: 0.383 },
     leftLowerArm:  { x: NaN, y: NaN, z: NaN },
-    rightUpperArm: { x: NaN, y: Math.PI / 6, z: -0.383 },
+    rightUpperArm: { x: NaN, y: 0, z: -0.383 },
     rightLowerArm: { x: NaN, y: NaN, z: NaN },
   },
   overhead: {
     // Arms raised ~45° above horizontal: θ = −π/4.
-    // z = ∓2.3·(−π/4)/π ≈ ∓(−0.575); y = ∓(−π/4).
-    leftUpperArm:  { x: NaN, y: Math.PI / 4, z: -0.575 },
+    // z = ±2.3·(−π/4)/π = ∓0.575; y = 0.
+    leftUpperArm:  { x: NaN, y: 0, z: -0.575 },
     leftLowerArm:  { x: 0, y: 0, z: 0 },
-    rightUpperArm: { x: NaN, y: -Math.PI / 4, z: 0.575 },
+    rightUpperArm: { x: NaN, y: 0, z: 0.575 },
     rightLowerArm: { x: 0, y: 0, z: 0 },
   },
   // Salute and cross are asymmetric / complex — captured for display and
@@ -735,7 +736,10 @@ export function applyCalibration(
 // Persistence — calibrating before every stream is tedious; keep the last
 // calibration in localStorage (camera setups rarely move between sessions).
 
-const STORAGE_KEY = "vtube.calibration.v2";
+// v3: arm euler sign convention fixed (z negated, upper-arm y zeroed in adapter).
+// Old v2 calibrations stored z offsets of ≈±2.3 to compensate the inverted z —
+// they would wildly overcorrect the now-correct arm eulers.
+const STORAGE_KEY = "vtube.calibration.v3";
 
 export function saveCalibration(data: CalibrationData): void {
   try {

@@ -474,11 +474,21 @@ export function solveMocapFrame(
         y: riggedPose.Spine.y,
         z: riggedPose.Spine.z,
       };
+      // Kalidokit's arm euler output has two mismatches vs VRM normalized bones:
+      // 1. z is sign-inverted — arm-down produces -1.15 for the left arm but
+      //    VRM needs +1.15 (matches relaxArm's confirmed-correct RELAXED_UPPER_ARM_Z).
+      //    Negating z on all arm segments fixes this throughout the range.
+      // 2. Upper-arm y is locked near ±π/2 by angleBetween3DCoords (angle at the
+      //    shoulder between the torso-shoulder line and the arm direction). That
+      //    angle is ≈π/2 for nearly every natural arm position, so it is
+      //    insensitive to actual arm direction and applies a constant ~90°
+      //    rotation that swings arms backward in VRM space. Zeroing it removes
+      //    this artifact; lower-arm y is left untouched (encodes elbow bend).
       frame.arms = {
-        leftUpperArm: { ...riggedPose.LeftUpperArm },
-        leftLowerArm: { ...riggedPose.LeftLowerArm },
-        rightUpperArm: { ...riggedPose.RightUpperArm },
-        rightLowerArm: { ...riggedPose.RightLowerArm },
+        leftUpperArm:  { x: riggedPose.LeftUpperArm.x,  y: 0, z: -riggedPose.LeftUpperArm.z  },
+        leftLowerArm:  { x: riggedPose.LeftLowerArm.x,  y: riggedPose.LeftLowerArm.y,  z: -riggedPose.LeftLowerArm.z  },
+        rightUpperArm: { x: riggedPose.RightUpperArm.x, y: 0, z: -riggedPose.RightUpperArm.z },
+        rightLowerArm: { x: riggedPose.RightLowerArm.x, y: riggedPose.RightLowerArm.y, z: -riggedPose.RightLowerArm.z },
       };
 
       // Hips: rotation from the 3D hip line; position is a rough translation
