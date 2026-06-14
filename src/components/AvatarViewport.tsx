@@ -11,7 +11,7 @@ import {
   SAMPLE_SKIN_URL,
 } from "../vrm/skin";
 import { applyDemoPoseToVRM, applyMocapToVRM } from "../vrm/applyMocapToVRM";
-import { createPositionalRetargeter, type PositionalRetargeter } from "../vrm/applyPositionalToVRM";
+import { applyJointMatchToVRM, initJointMatchCache } from "../vrm/jointMatchRetarget";
 import type { ExpressionMapping } from "../vrm/expressionMap";
 import type { MocapFrame, DebugLandmarks } from "../mocap/types";
 import type { CalibrationPoseDef } from "../mocap/calibration";
@@ -150,8 +150,6 @@ export function AvatarViewport({
     const grid = new THREE.GridHelper(4, 8, 0x444466, 0x2a2a3a);
     scene.add(grid);
 
-    const positional: PositionalRetargeter = createPositionalRetargeter();
-
     let vrm: VRM | null = null;
     // Guards against a slow earlier load resolving after a newer one (e.g.
     // the user picks a file while the default model is still downloading).
@@ -167,6 +165,7 @@ export function AvatarViewport({
       onExpressionMap?.(loaded.expressionMap);
       if (vrm.lookAt) vrm.lookAt.target = lookAtTarget;
       scene.add(vrm.scene);
+      initJointMatchCache(vrm); // measure T-pose rest directions before any frame runs
       setLoad({ phase: "ready", source: loaded.sourceUrl });
       // A new model starts with its own factory textures.
       setSkinActive(false);
@@ -239,13 +238,13 @@ export function AvatarViewport({
               frame,
               lookAtTarget,
               expressionMapRef.current,
-              mode !== "stabilized", // direct=true for both "direct" and "positional"
+              mode !== "stabilized",
             );
 
             if (mode === "positional") {
               const pose = debugLandmarksRef?.current?.pose ?? null;
               const mx   = mirrorRef.current ? -1 : 1;
-              positional.apply(vrm, pose, mx, aspectRef.current);
+              applyJointMatchToVRM(vrm, pose, mx, aspectRef.current);
             }
           }
         }
