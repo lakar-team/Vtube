@@ -188,6 +188,21 @@ export function WebcamView({
           ctx.fill();
         }
       }
+
+      // Face detection status badge — always drawn last so it's on top.
+      // Shows "face: 478 lm" (green) when landmarks arrive, "face: –" (red) when not.
+      // Remove once face mesh is confirmed working end-to-end.
+      {
+        const txt = face ? `face: ${face.length} lm` : "face: –";
+        ctx.save();
+        ctx.font = "bold 12px monospace";
+        const tw = ctx.measureText(txt).width;
+        ctx.fillStyle = face ? "rgba(0,160,70,0.85)" : "rgba(200,30,30,0.85)";
+        ctx.fillRect(4, 4, tw + 10, 20);
+        ctx.fillStyle = "#fff";
+        ctx.fillText(txt, 9, 18);
+        ctx.restore();
+      }
     }
 
     rafId = requestAnimationFrame(draw);

@@ -53,10 +53,16 @@ export async function createLandmarkers(): Promise<Landmarkers> {
     FaceLandmarker.createFromOptions(fileset, {
       baseOptions: {
         modelAssetPath: FACE_MODEL_URL,
-        delegate: "GPU",
+        // Do NOT force GPU delegate here — on some GPUs/browsers the face
+        // model with blendshapes silently returns 0 faces when GPU is forced.
+        // Omitting delegate lets MediaPipe auto-select (GPU → CPU fallback).
       },
       runningMode: "VIDEO",
       numFaces: 1,
+      // Lower thresholds so marginal angles / lighting still detect.
+      minFaceDetectionConfidence: 0.3,
+      minFacePresenceConfidence: 0.3,
+      minTrackingConfidence: 0.5,
       // The blendshapes are the key feature: direct, calibrated-ish 0..1
       // ARKit coefficients for blinks/jaw/mouth — far more reliable than
       // deriving them geometrically from landmark distances.
