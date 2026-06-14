@@ -3,7 +3,18 @@ import type { MutableRefObject } from "react";
 import * as THREE from "three";
 import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import type { DebugLandmarks, MocapFrame } from "../mocap/types";
-import { FACE_TESSELATION, FACE_CONTOURS } from "./WebcamView";
+import { FACE_TESSELATION } from "./WebcamView";
+
+// Triangle indices extracted from the edge-pair tessellation.
+// FACE_TESSELATION stores each triangle as 6 values: [v0,v1, v1,v2, v2,v0].
+// Taking positions 0,2,4 within each 6-element group gives the 3 vertex indices.
+const _triCount = FACE_TESSELATION.length / 6; // 852 triangles
+const FACE_TRIS  = new Uint16Array(_triCount * 3);
+for (let _i = 0; _i < _triCount; _i++) {
+  FACE_TRIS[_i * 3    ] = FACE_TESSELATION[_i * 6    ];
+  FACE_TRIS[_i * 3 + 1] = FACE_TESSELATION[_i * 6 + 2];
+  FACE_TRIS[_i * 3 + 2] = FACE_TESSELATION[_i * 6 + 4];
+}
 
 /**
  * Mannequin diagnostic viewport — raw MediaPipe pose + hand + face landmark
@@ -247,35 +258,35 @@ export function SkeletonViewport({
     ];
     const allMeshes = [...bodyMeshes, ...handMeshes, ...faceMeshes];
 
-    const tessSegCount = FACE_TESSELATION.length / 2;
-    const tessVerts    = new Float32Array(tessSegCount * 6);
-    const tessGeo      = new THREE.BufferGeometry();
-    tessGeo.setAttribute("position", new THREE.BufferAttribute(tessVerts, 3));
-    const tessMat  = new THREE.LineBasicMaterial({
-      color: 0x50fa7b, opacity: 0.35, transparent: true, depthTest: false,
-    });
-    const tessLines = new THREE.LineSegments(tessGeo, tessMat);
-    tessLines.renderOrder = 2;
-    tessLines.visible = false;
-    scene.add(tessLines);
+    // Indexed triangle mesh — 468 vertices, 852 triangles (from FACE_TRIS).
+    // One position slot per landmark; index buffer is static (never changes).
+    // Per-frame update: only the Float32Array positions (468*3 = 1404 floats).
+    const faceVerts     = new Float32Array(468 * 3);
+    const faceGeo       = new THREE.BufferGeometry();
+    faceGeo.setAttribute("position", new THREE.BufferAttribute(faceVerts, 3));
+    faceGeo.setIndex(new THREE.BufferAttribute(FACE_TRIS, 1));
 
-    const contSegCount = FACE_CONTOURS.length / 2;
-    const contVerts    = new Float32Array(contSegCount * 6);
-    const contGeo      = new THREE.BufferGeometry();
-    contGeo.setAttribute("position", new THREE.BufferAttribute(contVerts, 3));
-    const contMat  = new THREE.LineBasicMaterial({
-      color: 0x50fa7b, opacity: 0.88, transparent: true, depthTest: false,
+    // Filled semi-transparent surface — visible at any scale, no 1px line cap.
+    const faceSolidMat  = new THREE.MeshBasicMaterial({
+      color: 0x50fa7b, transparent: true, opacity: 0.18,
+      side: THREE.DoubleSide, depthTest: false,
     });
-    const contLines = new THREE.LineSegments(contGeo, contMat);
-    contLines.renderOrder = 2;
+    // Wireframe overlay on the same geometry to show triangle edges.
+    const faceWireMat   = new THREE.MeshBasicMaterial({
+      color: 0x50fa7b, wireframe: true, transparent: true, opacity: 0.60,
+      depthTest: false,
+    });
+    const faceSolidMesh = new THREE.Mesh(faceGeo, faceSolidMat);
+    const faceWireMesh  = new THREE.Mesh(faceGeo, faceWireMat);
+    [faceSolidMesh, faceWireMesh].forEach(m => {
+      m.renderOrder = 2;
+      m.frustumCulled = false;
+    });
 
-    // Parent both line objects to a group so overall head position is handled by
-    // the group transform — vertices live in local space (offsets from face centroid).
+    // headGroup acts as the "head bone": positioned at face centroid each frame.
     const headGroup = new THREE.Group();
-    tessLines.frustumCulled = false;
-    contLines.frustumCulled = false;
-    headGroup.add(tessLines);
-    headGroup.add(contLines);
+    headGroup.add(faceSolidMesh);
+    headGroup.add(faceWireMesh);
     headGroup.visible = false;
     scene.add(headGroup);
 
@@ -418,9 +429,8 @@ export function SkeletonViewport({
         mTongue.visible = false;
       }
 
-      // Dense face mesh — headGroup acts as the "head bone": positioned at the
-      // face centroid in world space each frame. Tessellation vertices are in
-      // headGroup local space (offsets from centroid), so head movement is free.
+      // Face triangle mesh — headGroup (head bone) positioned at centroid each frame.
+      // Only 468 position slots to update per frame; index buffer is static.
       if (face && face.length >= 468) {
         let sumX = 0, sumY = 0;
         for (let i = 0; i < 468; i++) { sumX += face[i].x; sumY += face[i].y; }
@@ -429,43 +439,13 @@ export function SkeletonViewport({
         headGroup.position.set(mx * (meanX - 0.5) * asp, -(meanY - 0.5), FACE_Z);
         headGroup.visible = true;
 
-        let vi = 0;
-        for (let i = 0; i < FACE_TESSELATION.length; i += 2) {
-          const pa = face[FACE_TESSELATION[i]];
-          const pb = face[FACE_TESSELATION[i + 1]];
-          if (pa && pb) {
-            tessVerts[vi    ] = mx * (pa.x - meanX) * asp;
-            tessVerts[vi + 1] = -(pa.y - meanY);
-            tessVerts[vi + 2] = 0;
-            tessVerts[vi + 3] = mx * (pb.x - meanX) * asp;
-            tessVerts[vi + 4] = -(pb.y - meanY);
-            tessVerts[vi + 5] = 0;
-          } else {
-            tessVerts[vi] = tessVerts[vi+1] = tessVerts[vi+2] = 0;
-            tessVerts[vi+3] = tessVerts[vi+4] = tessVerts[vi+5] = 0;
-          }
-          vi += 6;
+        for (let i = 0; i < 468; i++) {
+          const lm = face[i];
+          faceVerts[i * 3    ] = mx * (lm.x - meanX) * asp;
+          faceVerts[i * 3 + 1] = -(lm.y - meanY);
+          faceVerts[i * 3 + 2] = 0;
         }
-        (tessGeo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
-
-        vi = 0;
-        for (let i = 0; i < FACE_CONTOURS.length; i += 2) {
-          const pa = face[FACE_CONTOURS[i]];
-          const pb = face[FACE_CONTOURS[i + 1]];
-          if (pa && pb) {
-            contVerts[vi    ] = mx * (pa.x - meanX) * asp;
-            contVerts[vi + 1] = -(pa.y - meanY);
-            contVerts[vi + 2] = 0.001;
-            contVerts[vi + 3] = mx * (pb.x - meanX) * asp;
-            contVerts[vi + 4] = -(pb.y - meanY);
-            contVerts[vi + 5] = 0.001;
-          } else {
-            contVerts[vi] = contVerts[vi+1] = contVerts[vi+2] = 0;
-            contVerts[vi+3] = contVerts[vi+4] = contVerts[vi+5] = 0;
-          }
-          vi += 6;
-        }
-        (contGeo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+        (faceGeo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
       } else {
         headGroup.visible = false;
       }
@@ -496,8 +476,7 @@ export function SkeletonViewport({
       matL.dispose(); matR.dispose(); matC.dispose();
       matFace.dispose(); matMouth.dispose();
       matMouthOpen.dispose(); matTongue.dispose();
-      tessGeo.dispose(); tessMat.dispose();
-      contGeo.dispose(); contMat.dispose();
+      faceGeo.dispose(); faceSolidMat.dispose(); faceWireMat.dispose();
       for (const m of allMeshes) m.geometry.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
