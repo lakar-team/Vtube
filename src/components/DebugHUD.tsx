@@ -16,9 +16,6 @@ export interface DebugHUDProps {
 interface HudSample {
   rawHead: { x: number; y: number; z: number };
   smHead: { x: number; y: number; z: number };
-  rawSpinePitch: number;
-  smSpinePitch: number;
-  spineDebug: MocapFrame["spineDebug"];
   rawBlinkL: number;
   smBlinkL: number;
   rawAa: number;
@@ -63,9 +60,6 @@ export function DebugHUD({ state, rawFrameRef, frameRef, expressionMap }: DebugH
       setSample({
         rawHead: raw.head,
         smHead: sm.head,
-        rawSpinePitch: raw.spine.x,
-        smSpinePitch: sm.spine.x,
-        spineDebug: raw.spineDebug,
         rawBlinkL: raw.expressions.blinkLeft,
         smBlinkL: sm.expressions.blinkLeft,
         rawAa: raw.expressions.aa,
@@ -81,8 +75,6 @@ export function DebugHUD({ state, rawFrameRef, frameRef, expressionMap }: DebugH
     }, 200);
     return () => clearInterval(id);
   }, [rawFrameRef, frameRef]);
-
-  const sd = sample?.spineDebug ?? null;
 
   return (
     <div className="debug-hud">
@@ -156,20 +148,6 @@ export function DebugHUD({ state, rawFrameRef, frameRef, expressionMap }: DebugH
             </td>
             <td className="num">
               {deg(sample?.smHead.x)} / {deg(sample?.smHead.y)} / {deg(sample?.smHead.z)}
-            </td>
-          </tr>
-          <tr>
-            <td>torso pitch / bow (deg)</td>
-            <td className="num">{deg(sample?.rawSpinePitch)}</td>
-            <td className="num">{deg(sample?.smSpinePitch)}</td>
-          </tr>
-          <tr>
-            <td>pitch est. z / size (deg)</td>
-            <td className="num">
-              {deg(sd?.worldPitch)} / {deg(sd?.sizePitch)}
-            </td>
-            <td className="num">
-              ratio {val(sd?.ratio)} / ref {val(sd?.refRatio)}
             </td>
           </tr>
           <tr>

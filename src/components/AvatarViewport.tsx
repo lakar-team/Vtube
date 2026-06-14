@@ -10,11 +10,10 @@ import {
   resetSkin,
   SAMPLE_SKIN_URL,
 } from "../vrm/skin";
-import { applyDemoPoseToVRM, applyMocapToVRM } from "../vrm/applyMocapToVRM";
+import { applyMocapToVRM } from "../vrm/applyMocapToVRM";
 import { applyJointMatchToVRM, initJointMatchCache } from "../vrm/jointMatchRetarget";
 import type { ExpressionMapping } from "../vrm/expressionMap";
 import type { MocapFrame, DebugLandmarks } from "../mocap/types";
-import type { CalibrationPoseDef } from "../mocap/calibration";
 
 export type TrackingMode = "stabilized" | "direct" | "positional";
 
@@ -36,11 +35,6 @@ export interface AvatarViewportProps {
   debugLandmarksRef?: PoseDebugRef;
   /** Bust-up framing (face/hands detail) or full-body framing (legs). */
   viewMode?: ViewMode;
-  /**
-   * While body calibration runs, the avatar DEMONSTRATES this pose instead
-   * of following mocap, so the user can copy it. null = follow mocap.
-   */
-  demoPose?: CalibrationPoseDef | null;
   /** Called once the VRM loads with its blendshape support summary, for the
    *  debug HUD's "unsupported channels" warning. */
   onExpressionMap?: (mapping: ExpressionMapping) => void;
@@ -69,15 +63,12 @@ export function AvatarViewport({
   frameRef,
   debugLandmarksRef,
   viewMode = "bust",
-  demoPose = null,
   onExpressionMap,
   trackingMode = "direct",
   mirror = true,
 }: AvatarViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   // The render loop reads these through refs so prop changes don't re-create the scene.
-  const demoPoseRef = useRef<CalibrationPoseDef | null>(demoPose);
-  demoPoseRef.current = demoPose;
   const trackingModeRef = useRef(trackingMode);
   trackingModeRef.current = trackingMode;
   const mirrorRef = useRef(mirror);
@@ -223,29 +214,24 @@ export function AvatarViewport({
     renderer.setAnimationLoop(() => {
       const delta = clock.getDelta();
       if (vrm) {
-        const demo = demoPoseRef.current;
-        if (demo) {
-          applyDemoPoseToVRM(vrm, demo);
-        } else {
-          const frame = frameRef.current;
-          const mode  = trackingModeRef.current;
-          if (frame) {
-            // Always run applyMocapToVRM: handles expressions, lookAt, spring bones,
-            // and spine/head/wrist/finger bones. In positional mode its arm/leg
-            // rotations are immediately overridden below.
-            applyMocapToVRM(
-              vrm,
-              frame,
-              lookAtTarget,
-              expressionMapRef.current,
-              mode !== "stabilized",
-            );
+        const frame = frameRef.current;
+        const mode  = trackingModeRef.current;
+        if (frame) {
+          // Always run applyMocapToVRM: handles expressions, lookAt, spring bones,
+          // and spine/head/wrist/finger bones. In positional mode its arm/leg
+          // rotations are immediately overridden below.
+          applyMocapToVRM(
+            vrm,
+            frame,
+            lookAtTarget,
+            expressionMapRef.current,
+            mode !== "stabilized",
+          );
 
-            if (mode === "positional") {
-              const pose = debugLandmarksRef?.current?.pose ?? null;
-              const mx   = mirrorRef.current ? -1 : 1;
-              applyJointMatchToVRM(vrm, pose, mx, aspectRef.current);
-            }
+          if (mode === "positional") {
+            const pose = debugLandmarksRef?.current?.pose ?? null;
+            const mx   = mirrorRef.current ? -1 : 1;
+            applyJointMatchToVRM(vrm, pose, mx, aspectRef.current);
           }
         }
         vrm.update(delta);

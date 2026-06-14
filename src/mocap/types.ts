@@ -7,53 +7,6 @@ export interface EulerRotation {
   z: number;
 }
 
-/**
- * How torso pitch (bowing) is estimated — see kalidokitAdapter.
- * - "z":      geometric pitch from MediaPipe's world-landmark depth. Direct,
- *             but monocular z is heavily compressed so deep bows underread.
- * - "size":   image-space foreshortening (apparent hip->shoulder distance vs
- *             shoulder width — the classic apparent-size monocular depth cue).
- *             Robust magnitude, needs an upright reference ratio.
- * - "hybrid": whichever of the two reports the larger magnitude (default).
- */
-export const TORSO_PITCH_SOURCES = ["hybrid", "size", "z"] as const;
-export type TorsoPitchSource = (typeof TORSO_PITCH_SOURCES)[number];
-
-/** Live internals of the torso-pitch estimators, for the debug HUD. */
-export interface SpinePitchDebug {
-  /** Pitch (rad) from the world-landmark z estimator (centered + gained). */
-  worldPitch: number;
-  /** Pitch (rad) from the apparent-size (foreshortening) estimator. */
-  sizePitch: number;
-  /**
-   * The world-z pitch BEFORE the calibration center/gain — what the geometry
-   * alone says. Body calibration records this raw value (neutral pose ->
-   * center, bow pose -> gain) so re-calibrating is never skewed by the
-   * previous calibration.
-   */
-  worldPitchRaw: number;
-  /** Measured torso length / shoulder width (image space). */
-  ratio: number;
-  /** Upright reference ratio in use (0 = none yet). */
-  refRatio: number;
-}
-
-/**
- * Per-user torso-pitch (bow) calibration, produced by the body-calibration
- * pose sequence (see calibration.ts) and consumed by the solver:
- * - worldCenter: raw world-z pitch while the user is upright (camera-angle
- *   bias — a webcam looking up at you reads a constant lean).
- * - worldGain: scale so the world-z estimator reports the demonstrated angle
- *   during the bow pose (monocular z is compressed; this measures by how
- *   much for THIS camera/user).
- * - sizeGain: same idea for the apparent-size estimator.
- */
-export interface PitchCalibration {
-  worldCenter: number;
-  worldGain: number;
-  sizeGain: number;
-}
-
 /** VRM expression channels we drive (VRM 1.0 preset names). */
 export const EXPRESSION_KEYS = [
   "blinkLeft",
@@ -268,14 +221,6 @@ export interface MocapFrame {
   legs: LegRotations;
   hips: HipsFrame;
   hands: HandsFrame;
-  /**
-   * Measured torso length / shoulder width in image space (0 when pose is
-   * untracked). Captured during body calibration as the upright reference
-   * for the apparent-size torso-pitch estimator.
-   */
-  torsoRatio: number;
-  /** Torso-pitch estimator internals for the HUD (null when pose untracked). */
-  spineDebug: SpinePitchDebug | null;
   confidence: { face: number; pose: number; legs: number; leftHand: number; rightHand: number };
 }
 
@@ -341,8 +286,6 @@ export function emptyFrame(t = 0): MocapFrame {
     legs: zeroLegs(),
     hips: zeroHips(),
     hands: emptyHandsFrame(),
-    torsoRatio: 0,
-    spineDebug: null,
     confidence: { face: 0, pose: 0, legs: 0, leftHand: 0, rightHand: 0 },
   };
 }

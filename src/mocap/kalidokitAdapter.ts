@@ -15,8 +15,6 @@ import {
   type FingerSegment,
   type HandRotations,
   type MocapFrame,
-  type PitchCalibration,
-  type TorsoPitchSource,
 } from "./types";
 import { clamp } from "../utils/math";
 
@@ -110,13 +108,6 @@ function mirrorEuler(e: EulerRotation): EulerRotation {
   return { x: e.x, y: -e.y, z: -e.z };
 }
 
-function midpoint3(
-  a: { x: number; y: number; z: number },
-  b: { x: number; y: number; z: number },
-): { x: number; y: number; z: number } {
-  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 };
-}
-
 /**
  * Maps VRM humanoid finger-bone segment names to the corresponding key
  * suffix in Kalidokit's `Hand.solve` result (e.g. result[`${side}IndexProximal`]).
@@ -208,36 +199,8 @@ export interface SolveOptions {
   mirror: boolean;
   /** Solve legs/hips from the lower-body landmarks when visible. */
   trackLegs: boolean;
-  /** Which torso-pitch (bow) estimator to use. */
-  torsoPitchSource: TorsoPitchSource;
-  /**
-   * Upright reference for the apparent-size pitch estimator: torso length /
-   * shoulder width while standing straight (from body calibration, or a
-   * running max maintained by useMocap). null = no reference yet, size
-   * estimator stays at 0.
-   */
-  refTorsoRatio: number | null;
-  /**
-   * Per-user bow calibration (center + gains) from the body pose sequence.
-   * null = uncalibrated: center 0, gains 1 (raw estimator output).
-   */
-  pitchCalib: PitchCalibration | null;
   /** Timestamp in seconds. */
   t: number;
-}
-
-/**
- * Magnitude of the apparent-size (foreshortening) pitch estimate for a
- * measured torso ratio against the upright reference, including the soft
- * knee that keeps acos's infinite slope at 1 from turning resting jitter
- * into degrees of pitch. Shared with calibration.ts, which inverts this
- * mapping at the bow pose to derive the per-user size gain.
- */
-export function apparentSizePitchMag(ratio: number, refRatio: number): number {
-  let mag = Math.acos(clamp(ratio / refRatio, 0, 1));
-  const KNEE = 0.25;
-  if (mag < KNEE) mag = (mag * mag) / KNEE;
-  return mag;
 }
 
 export interface SolveResult {
@@ -250,7 +213,7 @@ export function solveMocapFrame(
   poseResult: PoseLandmarkerResult | null,
   handResult: HandLandmarkerResult | null,
   video: HTMLVideoElement,
-  { mirror, trackLegs, torsoPitchSource, refTorsoRatio, pitchCalib, t }: SolveOptions,
+  { mirror, trackLegs, t }: SolveOptions,
 ): SolveResult {
   const frame = emptyFrame(t);
   const debug: DebugLandmarks = { face: null, pose: null, leftHand: null, rightHand: null };
@@ -374,85 +337,6 @@ export function solveMocapFrame(
 
     if (riggedPose && frame.confidence.pose > 0.5) {
       frame.poseTracked = true;
-      // Kalidokit hard-zeroes Spine.x and Hips.rotation.x ("temp fix for
-      // inaccurate X axis" in its calcHips), so a bow never reached the torso
-      // — only the head/neck bent. We recover torso pitch ourselves, two ways:
-      //
-      // 1. "z" — geometric pitch of the world-landmark hip->shoulder vector.
-      //    World y grows downward and z shrinks toward the camera, so bowing
-      //    forward drives dz negative; atan2 is 0 upright and negative when
-      //    bowing, matching the head.x convention (pitch down = negative) so
-      //    the same per-model sign mapping applies downstream. |dy| is used
-      //    so a flipped y convention can't pin the angle at the clamp.
-      //    Weakness: monocular z is heavily compressed — deep bows underread.
-      //
-      // 2. "size" — image-space foreshortening: bowing shrinks the apparent
-      //    hip->shoulder distance while shoulder width stays constant, so
-      //    pitch ≈ acos(ratio / uprightRatio). Both lengths scale together
-      //    with camera distance, so stepping closer doesn't read as a bow.
-      //    Direction is borrowed from the z estimator (foreshortening alone
-      //    can't tell forward from backward). Torso yaw shrinks the shoulder
-      //    width, INFLATING the ratio — which clamps to 0 pitch, a safe
-      //    failure (no false bows while turned).
-      const shoulderMid = midpoint3(poseWorld[11], poseWorld[12]);
-      const hipMid = midpoint3(poseWorld[23], poseWorld[24]);
-      const worldPitchRaw = clamp(
-        Math.atan2(
-          shoulderMid.z - hipMid.z,
-          Math.abs(shoulderMid.y - hipMid.y),
-        ),
-        -1.6,
-        1.6,
-      );
-      // Calibration: subtract the upright reading (camera-angle bias) and
-      // scale by the measured-bow gain (monocular z compression).
-      const worldPitch = clamp(
-        (worldPitchRaw - (pitchCalib?.worldCenter ?? 0)) *
-          (pitchCalib?.worldGain ?? 1),
-        -1.6,
-        1.6,
-      );
-
-      // Image-space lengths in image-height units (x re-scaled by aspect so
-      // horizontal and vertical distances are commensurable).
-      const aspect = (video.videoWidth || 640) / (video.videoHeight || 480);
-      const dist2d = (
-        a: { x: number; y: number },
-        b: { x: number; y: number },
-      ) => Math.hypot((a.x - b.x) * aspect, a.y - b.y);
-      const shoulderWidth = dist2d(poseImage[11], poseImage[12]);
-      const torsoLen = dist2d(
-        midpoint3(poseImage[11], poseImage[12]),
-        midpoint3(poseImage[23], poseImage[24]),
-      );
-      frame.torsoRatio = shoulderWidth > 1e-4 ? torsoLen / shoulderWidth : 0;
-
-      let sizePitch = 0;
-      if (refTorsoRatio && refTorsoRatio > 0.2 && frame.torsoRatio > 0) {
-        const mag =
-          apparentSizePitchMag(frame.torsoRatio, refTorsoRatio) *
-          (pitchCalib?.sizeGain ?? 1);
-        // Foreshortening alone can't tell forward from backward — borrow the
-        // direction from the (calibrated) world-z estimator.
-        sizePitch = clamp(worldPitch <= 0 ? -mag : mag, -1.4, 1.4);
-      }
-
-      const torsoPitch =
-        torsoPitchSource === "z"
-          ? worldPitch
-          : torsoPitchSource === "size"
-            ? sizePitch
-            : Math.abs(sizePitch) > Math.abs(worldPitch)
-              ? sizePitch
-              : worldPitch;
-
-      frame.spineDebug = {
-        worldPitch,
-        sizePitch,
-        worldPitchRaw,
-        ratio: frame.torsoRatio,
-        refRatio: refTorsoRatio ?? 0,
-      };
 
       // Per-arm gating (see types.ts). Mirror convention: frame.arms.left*
       // is solved from the subject's RIGHT arm landmarks (12/14/16) and
@@ -470,7 +354,7 @@ export function solveMocapFrame(
       };
 
       frame.spine = {
-        x: torsoPitch,
+        x: 0,
         y: riggedPose.Spine.y,
         z: riggedPose.Spine.z,
       };
