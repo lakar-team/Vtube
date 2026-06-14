@@ -227,7 +227,15 @@ export interface MocapFrame {
 /** Raw landmark arrays kept around for the debug overlay. */
 export interface DebugLandmarks {
   face: NormalizedLandmark[] | null;
+  /** Normalized image-space pose landmarks ([0,1], screen-aligned). */
   pose: NormalizedLandmark[] | null;
+  /**
+   * Metric pose world landmarks (meters, origin at hip midpoint) straight from
+   * MediaPipe's `worldLandmarks`. Distance-independent real proportions — the
+   * basis for the planned 3D Room View. Structurally identical to
+   * NormalizedLandmark ({x,y,z,visibility}) but the units are meters, not [0,1].
+   */
+  poseWorld: NormalizedLandmark[] | null;
   leftHand: NormalizedLandmark[] | null;
   rightHand: NormalizedLandmark[] | null;
 }

@@ -68,6 +68,7 @@ export function useMocap(
   const debugLandmarksRef = useRef<DebugLandmarks>({
     face: null,
     pose: null,
+    poseWorld: null,
     leftHand: null,
     rightHand: null,
   });

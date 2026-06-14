@@ -31,6 +31,8 @@ type LoadState =
   | { phase: "error"; message: string };
 
 /**
+ * VIEWPORT: VRM Avatar View — a.k.a. Face Portrait (avatar pane, top).
+ *
  * Three.js viewport: renders the VRM and applies the latest face mocap frame
  * on every render tick. Body bones remain in rest pose.
  */

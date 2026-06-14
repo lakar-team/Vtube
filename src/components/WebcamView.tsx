@@ -61,6 +61,8 @@ export interface WebcamViewProps {
 }
 
 /**
+ * VIEWPORT: Mocap Camera View (left pane).
+ *
  * Webcam preview with an optional landmark debug overlay.
  * The overlay canvas is drawn in un-mirrored video space and flipped with the
  * same CSS transform as the <video>, so points always line up with the image.

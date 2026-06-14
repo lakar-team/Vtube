@@ -5,6 +5,9 @@ import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import type { DebugLandmarks } from "../mocap/types";
 
 /**
+ * VIEWPORT: 3D Room View (right pane) — legacy 2D-screen-space implementation,
+ * being replaced by the metric 3D Room View (see docs/room-view-plan.md).
+ *
  * Mannequin diagnostic viewport — raw MediaPipe pose + hand landmark positions
  * rendered as a wooden-artist-mannequin figure with volume.
  *

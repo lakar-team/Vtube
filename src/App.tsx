@@ -143,6 +143,7 @@ export default function App() {
           state={mocap.state}
           rawFrameRef={mocap.rawFrameRef}
           frameRef={mocap.frameRef}
+          debugLandmarksRef={mocap.debugLandmarksRef}
           expressionMap={expressionMap}
         />
       </footer>

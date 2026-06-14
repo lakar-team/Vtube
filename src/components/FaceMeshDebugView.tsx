@@ -8,6 +8,8 @@ export interface FaceMeshDebugViewProps {
 }
 
 /**
+ * VIEWPORT: Face Mesh Panel (avatar pane, bottom).
+ *
  * Isolated face-mesh debug panel (sits under the avatar/VRM view).
  *
  * Crops and zooms to the face bounding box so the dense 468-point tessellation

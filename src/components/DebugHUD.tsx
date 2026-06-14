@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { MutableRefObject } from "react";
-import type { MocapFrame } from "../mocap/types";
+import type { DebugLandmarks, MocapFrame } from "../mocap/types";
 import type { MocapState } from "../mocap/useMocap";
 import type { ExpressionMapping } from "../vrm/expressionMap";
 import { fmtFixed, radToDeg } from "../utils/math";
@@ -9,8 +9,23 @@ export interface DebugHUDProps {
   state: MocapState;
   rawFrameRef: MutableRefObject<MocapFrame | null>;
   frameRef: MutableRefObject<MocapFrame | null>;
+  /** Raw landmark arrays — used here for the metric world-landmark sanity row. */
+  debugLandmarksRef: MutableRefObject<DebugLandmarks>;
   /** Per-model blendshape support summary, once the VRM has loaded. */
   expressionMap?: ExpressionMapping | null;
+}
+
+/** Euclidean distance between two {x,y,z} points. */
+function dist3(
+  a: { x: number; y: number; z: number },
+  b: { x: number; y: number; z: number },
+): number {
+  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+/** Meters, fixed width. */
+function m(v: number | null | undefined): string {
+  return v === null || v === undefined ? "  —" : v.toFixed(2);
 }
 
 interface HudSample {
@@ -27,6 +42,9 @@ interface HudSample {
   rightArmTracked: boolean;
   leftHandTracked: boolean;
   rightHandTracked: boolean;
+  /** Metric world-landmark sanity numbers (meters, pre-calibration). */
+  worldShoulders: number | null;
+  worldSpan: number | null;
 }
 
 /** Degrees, fixed width — readouts must never change the HUD's size. */
@@ -49,7 +67,13 @@ function val(v: number | undefined): string {
  * (placeholders before the first sample), every number is fixed-width, and
  * every variable label sits in a min-width cell (see index.css .hud-*).
  */
-export function DebugHUD({ state, rawFrameRef, frameRef, expressionMap }: DebugHUDProps) {
+export function DebugHUD({
+  state,
+  rawFrameRef,
+  frameRef,
+  debugLandmarksRef,
+  expressionMap,
+}: DebugHUDProps) {
   const [sample, setSample] = useState<HudSample | null>(null);
 
   useEffect(() => {
@@ -57,7 +81,26 @@ export function DebugHUD({ state, rawFrameRef, frameRef, expressionMap }: DebugH
       const raw = rawFrameRef.current;
       const sm = frameRef.current;
       if (!raw || !sm) return;
+
+      // Metric world-landmark sanity check (meters, raw MediaPipe scale).
+      // Shoulder width and nose→ankle span confirm worldLandmarks are flowing
+      // and roughly real-sized — the basis for Phase 2 height calibration.
+      const pw = debugLandmarksRef.current.poseWorld;
+      let worldShoulders: number | null = null;
+      let worldSpan: number | null = null;
+      if (pw && pw.length >= 33) {
+        worldShoulders = dist3(pw[11], pw[12]);
+        const ankleMid = {
+          x: (pw[27].x + pw[28].x) / 2,
+          y: (pw[27].y + pw[28].y) / 2,
+          z: (pw[27].z + pw[28].z) / 2,
+        };
+        worldSpan = dist3(pw[0], ankleMid);
+      }
+
       setSample({
+        worldShoulders,
+        worldSpan,
         rawHead: raw.head,
         smHead: sm.head,
         rawBlinkL: raw.expressions.blinkLeft,
@@ -74,7 +117,7 @@ export function DebugHUD({ state, rawFrameRef, frameRef, expressionMap }: DebugH
       });
     }, 200);
     return () => clearInterval(id);
-  }, [rawFrameRef, frameRef]);
+  }, [rawFrameRef, frameRef, debugLandmarksRef]);
 
   return (
     <div className="debug-hud">
@@ -129,6 +172,12 @@ export function DebugHUD({ state, rawFrameRef, frameRef, expressionMap }: DebugH
           <span>blendshapes</span>
           <strong>
             {expressionMap ? `${expressionMap.map.size}/${expressionMap.total} supported` : "—"}
+          </strong>
+        </div>
+        <div className="hud-row">
+          <span>world (m)</span>
+          <strong className="hud-cell-world">
+            shoulders {m(sample?.worldShoulders)} · nose→ankle {m(sample?.worldSpan)}
           </strong>
         </div>
       </div>
