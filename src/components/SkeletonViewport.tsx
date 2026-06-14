@@ -3,6 +3,7 @@ import type { MutableRefObject } from "react";
 import * as THREE from "three";
 import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import type { DebugLandmarks, MocapFrame } from "../mocap/types";
+import { FACE_TESSELATION, FACE_CONTOURS } from "./WebcamView";
 
 /**
  * Mannequin diagnostic viewport — raw MediaPipe pose + hand + face landmark
@@ -246,6 +247,30 @@ export function SkeletonViewport({
     ];
     const allMeshes = [...bodyMeshes, ...handMeshes, ...faceMeshes];
 
+    const tessSegCount = FACE_TESSELATION.length / 2;
+    const tessVerts    = new Float32Array(tessSegCount * 6);
+    const tessGeo      = new THREE.BufferGeometry();
+    tessGeo.setAttribute("position", new THREE.BufferAttribute(tessVerts, 3));
+    const tessMat  = new THREE.LineBasicMaterial({
+      color: 0x50fa7b, opacity: 0.35, transparent: true, depthTest: false,
+    });
+    const tessLines = new THREE.LineSegments(tessGeo, tessMat);
+    tessLines.renderOrder = 2;
+    tessLines.visible = false;
+    scene.add(tessLines);
+
+    const contSegCount = FACE_CONTOURS.length / 2;
+    const contVerts    = new Float32Array(contSegCount * 6);
+    const contGeo      = new THREE.BufferGeometry();
+    contGeo.setAttribute("position", new THREE.BufferAttribute(contVerts, 3));
+    const contMat  = new THREE.LineBasicMaterial({
+      color: 0x50fa7b, opacity: 0.88, transparent: true, depthTest: false,
+    });
+    const contLines = new THREE.LineSegments(contGeo, contMat);
+    contLines.renderOrder = 2;
+    contLines.visible = false;
+    scene.add(contLines);
+
     for (const m of allMeshes) { m.visible = false; scene.add(m); }
     // Face features always draw after the body so depthTest:false reads as
     // "on top of everything" rather than "randomly z-sorted".
@@ -385,6 +410,52 @@ export function SkeletonViewport({
         mTongue.visible = false;
       }
 
+      // Dense face mesh tessellation + contours (BufferGeometry updated in-place)
+      if (face && face.length >= 468) {
+        let vi = 0;
+        for (let i = 0; i < FACE_TESSELATION.length; i += 2) {
+          const pa = face[FACE_TESSELATION[i]];
+          const pb = face[FACE_TESSELATION[i + 1]];
+          if (pa && pb) {
+            tessVerts[vi    ] = mx * (pa.x - 0.5) * asp;
+            tessVerts[vi + 1] = -(pa.y - 0.5);
+            tessVerts[vi + 2] = FACE_Z;
+            tessVerts[vi + 3] = mx * (pb.x - 0.5) * asp;
+            tessVerts[vi + 4] = -(pb.y - 0.5);
+            tessVerts[vi + 5] = FACE_Z;
+          } else {
+            tessVerts[vi] = tessVerts[vi+1] = tessVerts[vi+2] = 0;
+            tessVerts[vi+3] = tessVerts[vi+4] = tessVerts[vi+5] = 0;
+          }
+          vi += 6;
+        }
+        (tessGeo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+        tessLines.visible = true;
+
+        vi = 0;
+        for (let i = 0; i < FACE_CONTOURS.length; i += 2) {
+          const pa = face[FACE_CONTOURS[i]];
+          const pb = face[FACE_CONTOURS[i + 1]];
+          if (pa && pb) {
+            contVerts[vi    ] = mx * (pa.x - 0.5) * asp;
+            contVerts[vi + 1] = -(pa.y - 0.5);
+            contVerts[vi + 2] = FACE_Z + 0.001;
+            contVerts[vi + 3] = mx * (pb.x - 0.5) * asp;
+            contVerts[vi + 4] = -(pb.y - 0.5);
+            contVerts[vi + 5] = FACE_Z + 0.001;
+          } else {
+            contVerts[vi] = contVerts[vi+1] = contVerts[vi+2] = 0;
+            contVerts[vi+3] = contVerts[vi+4] = contVerts[vi+5] = 0;
+          }
+          vi += 6;
+        }
+        (contGeo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+        contLines.visible = true;
+      } else {
+        tessLines.visible = false;
+        contLines.visible = false;
+      }
+
       renderer.render(scene, camera);
     });
 
@@ -411,6 +482,8 @@ export function SkeletonViewport({
       matL.dispose(); matR.dispose(); matC.dispose();
       matFace.dispose(); matMouth.dispose();
       matMouthOpen.dispose(); matTongue.dispose();
+      tessGeo.dispose(); tessMat.dispose();
+      contGeo.dispose(); contMat.dispose();
       for (const m of allMeshes) m.geometry.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
