@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { WebcamView } from "./components/WebcamView";
 import { AvatarViewport, type ViewMode } from "./components/AvatarViewport";
+import { FaceMeshDebugView } from "./components/FaceMeshDebugView";
 import { SkeletonViewport } from "./components/SkeletonViewport";
 import { DebugHUD } from "./components/DebugHUD";
 import { useWebcam } from "./hooks/useWebcam";
@@ -113,12 +114,17 @@ export default function App() {
         </section>
 
         {(displayMode === "avatar" || displayMode === "both") && (
-          <section className="pane">
-            <AvatarViewport
-              frameRef={mocap.frameRef}
-              viewMode={viewMode}
-              onExpressionMap={setExpressionMap}
-            />
+          <section className="pane pane-avatar">
+            <div className="avatar-stack-top">
+              <AvatarViewport
+                frameRef={mocap.frameRef}
+                viewMode={viewMode}
+                onExpressionMap={setExpressionMap}
+              />
+            </div>
+            <div className="avatar-stack-bottom">
+              <FaceMeshDebugView debugLandmarksRef={mocap.debugLandmarksRef} />
+            </div>
           </section>
         )}
 

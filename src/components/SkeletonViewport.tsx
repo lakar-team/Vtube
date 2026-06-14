@@ -146,6 +146,7 @@ export function SkeletonViewport({
   mirror,
 }: SkeletonViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const diagRef      = useRef<HTMLDivElement | null>(null);
   const mirrorRef    = useRef(mirror);
   mirrorRef.current  = mirror;
   const aspectRef    = useRef(1);
@@ -294,10 +295,14 @@ export function SkeletonViewport({
     const lastLm: (NormalizedLandmark | null)[] = new Array(35).fill(null);
 
     let disposed = false;
+    let frameN = 0;
+    let lastErr: string | null = null;
+    let diagPose = false, diagFace = 0, diagCyls = 0;
 
     renderer.setAnimationLoop(() => {
       if (disposed) return;
-
+      frameN++;
+      try {
       const pose = debugLandmarksRef.current.pose;
       const mx   = mirrorRef.current ? -1 : 1;
       const asp  = aspectRef.current;
@@ -427,8 +432,45 @@ export function SkeletonViewport({
         placeCyl(faceCyls[s], WF(face, a), WF(face, b));
       }
 
-      renderer.render(scene, camera);
+      // diagnostic snapshot (read by the status interval below)
+      diagPose = !!(pose && pose.some((p) => (p.visibility ?? 1) >= MIN_VIS));
+      diagFace = face ? face.length : 0;
+      diagCyls = faceCyls.reduce((n, m) => n + (m.visible ? 1 : 0), 0);
+      } catch (e) {
+        // A data-dependent error must never permanently kill the animation
+        // loop — three.js stops re-requesting frames if the callback throws,
+        // which would freeze the entire viewport (body + hands + face). Swallow
+        // it, surface it on the diagnostic badge, and keep rendering.
+        lastErr = e instanceof Error ? e.message : String(e);
+      }
+
+      try {
+        renderer.render(scene, camera);
+      } catch (e) {
+        lastErr = "render: " + (e instanceof Error ? e.message : String(e));
+      }
     });
+
+    // ── live diagnostic readout — runs on its own interval, not inside the
+    //    render loop, so a frozen loop is detectable (frame counter stops).
+    let prevFrameN = 0;
+    let prevTime = performance.now();
+    const diagTimer = window.setInterval(() => {
+      const el = diagRef.current;
+      if (!el) return;
+      const now = performance.now();
+      const df  = frameN - prevFrameN;
+      const fps = now > prevTime ? df / ((now - prevTime) / 1000) : 0;
+      prevFrameN = frameN;
+      prevTime   = now;
+      const alive = df > 0;
+      el.textContent =
+        `loop ${alive ? "●" : "✕ frozen"} ${fps.toFixed(0)}fps · ` +
+        `pose ${diagPose ? "Y" : "–"} · face ${diagFace} · ` +
+        `cyls ${diagCyls}/${FACE_SEGS.length}` +
+        (lastErr ? ` · ERR ${lastErr}` : "");
+      el.style.color = lastErr ? "#ff6b6b" : alive ? "" : "#ffb86c";
+    }, 250);
 
     // ── resize: keep orthographic frustum matched to container aspect ratio
     const onResize = () => {
@@ -446,6 +488,7 @@ export function SkeletonViewport({
 
     return () => {
       disposed = true;
+      window.clearInterval(diagTimer);
       ro.disconnect();
       renderer.setAnimationLoop(null);
       renderer.dispose();
@@ -465,6 +508,7 @@ export function SkeletonViewport({
         <span style={{ color: "#4477cc" }}>blue=left</span> ·{" "}
         <span style={{ color: "#cc3344" }}>red=right</span>
       </div>
+      <div ref={diagRef} className="viewport-diag" />
     </div>
   );
 }
