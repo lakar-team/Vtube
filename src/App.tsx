@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { WebcamView } from "./components/WebcamView";
-import { AvatarViewport, type ViewMode } from "./components/AvatarViewport";
+import { AvatarViewport, type ViewMode, type TrackingMode } from "./components/AvatarViewport";
 import { SkeletonViewport } from "./components/SkeletonViewport";
 import { CalibrationPanel } from "./components/CalibrationPanel";
 import { DebugHUD } from "./components/DebugHUD";
@@ -11,10 +11,9 @@ import { BODY_POSE_SEQUENCE, type CalibrationPoseDef } from "./mocap/calibration
 import type { ExpressionMapping } from "./vrm/expressionMap";
 
 type DisplayMode = "avatar" | "skeleton" | "both";
-const DISPLAY_MODE_KEY = "vtube.displayMode";
-
-const PITCH_SOURCE_KEY = "vtube.torsoPitchSource";
-const DIRECT_MODE_KEY = "vtube.directMode";
+const DISPLAY_MODE_KEY   = "vtube.displayMode";
+const PITCH_SOURCE_KEY   = "vtube.torsoPitchSource";
+const TRACKING_MODE_KEY  = "vtube.trackingMode";
 
 function loadPitchSource(): TorsoPitchSource {
   try {
@@ -25,13 +24,15 @@ function loadPitchSource(): TorsoPitchSource {
   }
 }
 
-function loadDirectMode(): boolean {
+function loadTrackingMode(): TrackingMode {
   try {
-    const v = localStorage.getItem(DIRECT_MODE_KEY);
-    // Default to true — direct mode is the new intended experience.
-    return v === null ? true : v === "1";
+    const v = localStorage.getItem(TRACKING_MODE_KEY) as TrackingMode | null;
+    if (v === "stabilized" || v === "direct" || v === "positional") return v;
+    // Migrate from old boolean directMode key.
+    const old = localStorage.getItem("vtube.directMode");
+    return old === "0" ? "stabilized" : "direct";
   } catch {
-    return true;
+    return "direct";
   }
 }
 
@@ -52,7 +53,7 @@ export default function App() {
   const [trackLegs, setTrackLegs] = useState(true);
   const [viewMode, setViewMode] = useState<ViewMode>("full");
   const [torsoPitchSource, setTorsoPitchSource] = useState<TorsoPitchSource>(loadPitchSource);
-  const [directMode, setDirectMode] = useState<boolean>(loadDirectMode);
+  const [trackingMode, setTrackingMode] = useState<TrackingMode>(loadTrackingMode);
   const [displayMode, setDisplayMode] = useState<DisplayMode>(loadDisplayMode);
   const [expressionMap, setExpressionMap] = useState<ExpressionMapping | null>(null);
 
@@ -62,12 +63,13 @@ export default function App() {
     trackLegs,
     torsoPitchSource,
     enabled: webcam.ready,
-    directMode,
+    // Both "direct" and "positional" bypass smoothing in the pipeline.
+    directMode: trackingMode !== "stabilized",
   });
 
-  const changeDirectMode = (v: boolean) => {
-    setDirectMode(v);
-    try { localStorage.setItem(DIRECT_MODE_KEY, v ? "1" : "0"); } catch { /* privacy mode */ }
+  const changeTrackingMode = (v: TrackingMode) => {
+    setTrackingMode(v);
+    try { localStorage.setItem(TRACKING_MODE_KEY, v); } catch { /* privacy mode */ }
   };
 
   const changeDisplayMode = (v: DisplayMode) => {
@@ -172,16 +174,21 @@ export default function App() {
             className="toggle"
             title={
               "Tracking mode:\n" +
-              "• direct — avatar responds in real time, 1:1 with mocap (may jitter with poor lighting)\n" +
-              "• stabilized — filters + slew limits smooth out jitter at the cost of some lag"
+              "• stabilized — One Euro filter + lerps: smooth, slight lag\n" +
+              "• direct — raw mocap passthrough: responsive, may jitter\n" +
+              "• positional — bypass Kalidokit IK; orient bones directly from\n" +
+              "  landmark positions (same 3D space as the skeleton diagnostic)"
             }
           >
-            <input
-              type="checkbox"
-              checked={directMode}
-              onChange={(e) => changeDirectMode(e.target.checked)}
-            />
-            direct
+            tracking
+            <select
+              value={trackingMode}
+              onChange={(e) => changeTrackingMode(e.target.value as TrackingMode)}
+            >
+              <option value="stabilized">stabilized</option>
+              <option value="direct">direct</option>
+              <option value="positional">positional</option>
+            </select>
           </label>
           <label
             className="toggle"
@@ -257,10 +264,12 @@ export default function App() {
           <section className="pane">
             <AvatarViewport
               frameRef={mocap.frameRef}
+              debugLandmarksRef={mocap.debugLandmarksRef}
               viewMode={viewMode}
               demoPose={demoPose ?? devDemoPose}
               onExpressionMap={setExpressionMap}
-              directMode={directMode}
+              trackingMode={trackingMode}
+              mirror={mirror}
             />
           </section>
         )}

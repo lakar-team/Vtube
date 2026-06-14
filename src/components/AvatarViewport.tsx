@@ -11,11 +11,17 @@ import {
   SAMPLE_SKIN_URL,
 } from "../vrm/skin";
 import { applyDemoPoseToVRM, applyMocapToVRM } from "../vrm/applyMocapToVRM";
+import { createPositionalRetargeter, type PositionalRetargeter } from "../vrm/applyPositionalToVRM";
 import type { ExpressionMapping } from "../vrm/expressionMap";
-import type { MocapFrame } from "../mocap/types";
+import type { MocapFrame, DebugLandmarks } from "../mocap/types";
 import type { CalibrationPoseDef } from "../mocap/calibration";
 
+export type TrackingMode = "stabilized" | "direct" | "positional";
+
 export type ViewMode = "bust" | "full";
+
+/** Narrow DebugLandmarks to just the pose array (avoids importing all of DebugLandmarks). */
+type PoseDebugRef = MutableRefObject<DebugLandmarks>;
 
 /** Camera placement per view mode (VRM humanoids stand at the origin). */
 const CAMERA_PRESETS: Record<ViewMode, { pos: [number, number, number]; look: [number, number, number] }> = {
@@ -26,6 +32,8 @@ const CAMERA_PRESETS: Record<ViewMode, { pos: [number, number, number]; look: [n
 export interface AvatarViewportProps {
   /** Smoothed mocap output from useMocap. */
   frameRef: MutableRefObject<MocapFrame | null>;
+  /** Raw MediaPipe landmarks — needed for positional retargeting mode. */
+  debugLandmarksRef?: PoseDebugRef;
   /** Bust-up framing (face/hands detail) or full-body framing (legs). */
   viewMode?: ViewMode;
   /**
@@ -37,10 +45,15 @@ export interface AvatarViewportProps {
    *  debug HUD's "unsupported channels" warning. */
   onExpressionMap?: (mapping: ExpressionMapping) => void;
   /**
-   * Direct mode: rig lerps snap to 1.0 and dampening is removed so the avatar
-   * responds instantly to mocap. Toggle with the "direct" checkbox.
+   * Tracking mode:
+   *  "stabilized" — One Euro filtered + lerped (smooth, slight lag)
+   *  "direct"     — raw frame, lerp=1 (responsive, may jitter)
+   *  "positional" — bypass Kalidokit IK; orient bones directly from landmark
+   *                 positions matching the Skeleton diagnostic mannequin
    */
-  directMode?: boolean;
+  trackingMode?: TrackingMode;
+  /** Mirror flag — required for correct axis mapping in positional mode. */
+  mirror?: boolean;
 }
 
 type LoadState =
@@ -54,17 +67,22 @@ type LoadState =
  */
 export function AvatarViewport({
   frameRef,
+  debugLandmarksRef,
   viewMode = "bust",
   demoPose = null,
   onExpressionMap,
-  directMode = false,
+  trackingMode = "direct",
+  mirror = true,
 }: AvatarViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   // The render loop reads these through refs so prop changes don't re-create the scene.
   const demoPoseRef = useRef<CalibrationPoseDef | null>(demoPose);
   demoPoseRef.current = demoPose;
-  const directModeRef = useRef(directMode);
-  directModeRef.current = directMode;
+  const trackingModeRef = useRef(trackingMode);
+  trackingModeRef.current = trackingMode;
+  const mirrorRef = useRef(mirror);
+  mirrorRef.current = mirror;
+  const aspectRef = useRef(1);
   const [load, setLoad] = useState<LoadState>({ phase: "loading" });
   /** Error from a user model upload — shown without discarding the current model. */
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -106,9 +124,10 @@ export function AvatarViewport({
 
     const scene = new THREE.Scene();
 
+    aspectRef.current = container.clientWidth / Math.max(container.clientHeight, 1);
     const camera = new THREE.PerspectiveCamera(
       27,
-      container.clientWidth / Math.max(container.clientHeight, 1),
+      aspectRef.current,
       0.1,
       30,
     );
@@ -130,6 +149,8 @@ export function AvatarViewport({
 
     const grid = new THREE.GridHelper(4, 8, 0x444466, 0x2a2a3a);
     scene.add(grid);
+
+    const positional: PositionalRetargeter = createPositionalRetargeter();
 
     let vrm: VRM | null = null;
     // Guards against a slow earlier load resolving after a newer one (e.g.
@@ -205,13 +226,30 @@ export function AvatarViewport({
       if (vrm) {
         const demo = demoPoseRef.current;
         if (demo) {
-          // Body calibration: demonstrate the target pose for the user.
           applyDemoPoseToVRM(vrm, demo);
         } else {
           const frame = frameRef.current;
-          if (frame) applyMocapToVRM(vrm, frame, lookAtTarget, expressionMapRef.current, directModeRef.current);
+          const mode  = trackingModeRef.current;
+          if (frame) {
+            // Always run applyMocapToVRM: handles expressions, lookAt, spring bones,
+            // and spine/head/wrist/finger bones. In positional mode its arm/leg
+            // rotations are immediately overridden below.
+            applyMocapToVRM(
+              vrm,
+              frame,
+              lookAtTarget,
+              expressionMapRef.current,
+              mode !== "stabilized", // direct=true for both "direct" and "positional"
+            );
+
+            if (mode === "positional") {
+              const pose = debugLandmarksRef?.current?.pose ?? null;
+              const mx   = mirrorRef.current ? -1 : 1;
+              positional.apply(vrm, pose, mx, aspectRef.current);
+            }
+          }
         }
-        vrm.update(delta); // applies expressions, lookAt, spring bones
+        vrm.update(delta);
       }
       renderer.render(scene, camera);
     });
@@ -219,7 +257,8 @@ export function AvatarViewport({
     const onResize = () => {
       const w = container.clientWidth;
       const h = Math.max(container.clientHeight, 1);
-      camera.aspect = w / h;
+      aspectRef.current = w / h;
+      camera.aspect = aspectRef.current;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
     };
