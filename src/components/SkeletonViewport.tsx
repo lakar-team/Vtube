@@ -268,8 +268,16 @@ export function SkeletonViewport({
     });
     const contLines = new THREE.LineSegments(contGeo, contMat);
     contLines.renderOrder = 2;
-    contLines.visible = false;
-    scene.add(contLines);
+
+    // Parent both line objects to a group so overall head position is handled by
+    // the group transform — vertices live in local space (offsets from face centroid).
+    const headGroup = new THREE.Group();
+    tessLines.frustumCulled = false;
+    contLines.frustumCulled = false;
+    headGroup.add(tessLines);
+    headGroup.add(contLines);
+    headGroup.visible = false;
+    scene.add(headGroup);
 
     for (const m of allMeshes) { m.visible = false; scene.add(m); }
     // Face features always draw after the body so depthTest:false reads as
@@ -410,19 +418,28 @@ export function SkeletonViewport({
         mTongue.visible = false;
       }
 
-      // Dense face mesh tessellation + contours (BufferGeometry updated in-place)
+      // Dense face mesh — headGroup acts as the "head bone": positioned at the
+      // face centroid in world space each frame. Tessellation vertices are in
+      // headGroup local space (offsets from centroid), so head movement is free.
       if (face && face.length >= 468) {
+        let sumX = 0, sumY = 0;
+        for (let i = 0; i < 468; i++) { sumX += face[i].x; sumY += face[i].y; }
+        const meanX = sumX / 468;
+        const meanY = sumY / 468;
+        headGroup.position.set(mx * (meanX - 0.5) * asp, -(meanY - 0.5), FACE_Z);
+        headGroup.visible = true;
+
         let vi = 0;
         for (let i = 0; i < FACE_TESSELATION.length; i += 2) {
           const pa = face[FACE_TESSELATION[i]];
           const pb = face[FACE_TESSELATION[i + 1]];
           if (pa && pb) {
-            tessVerts[vi    ] = mx * (pa.x - 0.5) * asp;
-            tessVerts[vi + 1] = -(pa.y - 0.5);
-            tessVerts[vi + 2] = FACE_Z;
-            tessVerts[vi + 3] = mx * (pb.x - 0.5) * asp;
-            tessVerts[vi + 4] = -(pb.y - 0.5);
-            tessVerts[vi + 5] = FACE_Z;
+            tessVerts[vi    ] = mx * (pa.x - meanX) * asp;
+            tessVerts[vi + 1] = -(pa.y - meanY);
+            tessVerts[vi + 2] = 0;
+            tessVerts[vi + 3] = mx * (pb.x - meanX) * asp;
+            tessVerts[vi + 4] = -(pb.y - meanY);
+            tessVerts[vi + 5] = 0;
           } else {
             tessVerts[vi] = tessVerts[vi+1] = tessVerts[vi+2] = 0;
             tessVerts[vi+3] = tessVerts[vi+4] = tessVerts[vi+5] = 0;
@@ -430,19 +447,18 @@ export function SkeletonViewport({
           vi += 6;
         }
         (tessGeo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
-        tessLines.visible = true;
 
         vi = 0;
         for (let i = 0; i < FACE_CONTOURS.length; i += 2) {
           const pa = face[FACE_CONTOURS[i]];
           const pb = face[FACE_CONTOURS[i + 1]];
           if (pa && pb) {
-            contVerts[vi    ] = mx * (pa.x - 0.5) * asp;
-            contVerts[vi + 1] = -(pa.y - 0.5);
-            contVerts[vi + 2] = FACE_Z + 0.001;
-            contVerts[vi + 3] = mx * (pb.x - 0.5) * asp;
-            contVerts[vi + 4] = -(pb.y - 0.5);
-            contVerts[vi + 5] = FACE_Z + 0.001;
+            contVerts[vi    ] = mx * (pa.x - meanX) * asp;
+            contVerts[vi + 1] = -(pa.y - meanY);
+            contVerts[vi + 2] = 0.001;
+            contVerts[vi + 3] = mx * (pb.x - meanX) * asp;
+            contVerts[vi + 4] = -(pb.y - meanY);
+            contVerts[vi + 5] = 0.001;
           } else {
             contVerts[vi] = contVerts[vi+1] = contVerts[vi+2] = 0;
             contVerts[vi+3] = contVerts[vi+4] = contVerts[vi+5] = 0;
@@ -450,10 +466,8 @@ export function SkeletonViewport({
           vi += 6;
         }
         (contGeo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
-        contLines.visible = true;
       } else {
-        tessLines.visible = false;
-        contLines.visible = false;
+        headGroup.visible = false;
       }
 
       renderer.render(scene, camera);
