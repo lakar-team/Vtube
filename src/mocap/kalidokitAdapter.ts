@@ -296,6 +296,31 @@ export function solveMocapFrame(
         if (score !== undefined) frame.expressions[name] = clamp(score, 0, 1);
       }
 
+      // Iris-based gaze: the eyeLook* blendshapes are computed by MediaPipe
+      // from actual iris-landmark position (indices 468-477) and are more
+      // accurate than Kalidokit's eye-contour estimate. They're already in
+      // frame.expressions from the ARKit passthrough loop above.
+      // Sign convention (pre-mirror, subject-anatomical frame):
+      //   x: positive = subject looking anatomically left
+      //   y: positive = looking up
+      // Mirror flip is applied later in the mirror block below.
+      {
+        const outL = frame.expressions.eyeLookOutLeft;
+        const inL  = frame.expressions.eyeLookInLeft;
+        const outR = frame.expressions.eyeLookOutRight;
+        const inR  = frame.expressions.eyeLookInRight;
+        const upL  = frame.expressions.eyeLookUpLeft;
+        const dnL  = frame.expressions.eyeLookDownLeft;
+        const upR  = frame.expressions.eyeLookUpRight;
+        const dnR  = frame.expressions.eyeLookDownRight;
+        if (outL + inL + outR + inR > 0.01) {
+          frame.pupil = {
+            x: clamp(((outL - inL) + (inR - outR)) * 0.5, -1, 1),
+            y: clamp(((upL + upR) - (dnL + dnR)) * 0.5, -1, 1),
+          };
+        }
+      }
+
       frame.confidence.face = 1;
     }
   }
