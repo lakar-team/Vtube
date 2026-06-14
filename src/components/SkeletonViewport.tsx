@@ -2,11 +2,11 @@ import { useEffect, useRef } from "react";
 import type { MutableRefObject } from "react";
 import * as THREE from "three";
 import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
-import type { DebugLandmarks, MocapFrame } from "../mocap/types";
+import type { DebugLandmarks } from "../mocap/types";
 
 /**
- * Mannequin diagnostic viewport — raw MediaPipe pose + hand + face landmark
- * positions rendered as a wooden-artist-mannequin figure with volume.
+ * Mannequin diagnostic viewport — raw MediaPipe pose + hand landmark positions
+ * rendered as a wooden-artist-mannequin figure with volume.
  *
  * COORDINATE SYSTEM (key to positional accuracy):
  *   We use an OrthographicCamera whose frustum exactly covers the normalized
@@ -18,6 +18,10 @@ import type { DebugLandmarks, MocapFrame } from "../mocap/types";
  *
  *   This makes every landmark project to the exact same screen pixel as the
  *   corresponding dot drawn on the 2D webcam overlay canvas.
+ *
+ * NOTE: this is the legacy 2D-screen-space viewport. It is being superseded by
+ * the metric 3D "Room View" (see room-view plan); face-mesh-on-skeleton trials
+ * were removed — the face mesh is shown in the dedicated Face Mesh Panel.
  */
 
 const Z_SCALE = 0.5;
@@ -40,35 +44,6 @@ const HAND_SEGS: ReadonlyArray<readonly [number, number, number]> = [
 ]; // 23 segments per hand
 
 const R_HAND_JNT = 0.009;
-
-// Face contour segments: [fromLandmark, toLandmark]
-// From FaceLandmarker key contours — face oval, eyes, eyebrows, lips.
-const FACE_SEGS: ReadonlyArray<readonly [number, number]> = [
-  // lips — outer upper / lower
-  [61,146],[146,91],[91,181],[181,84],[84,17],[17,314],[314,405],[405,321],[321,375],[375,291],
-  [61,185],[185,40],[40,39],[39,37],[37,0],[0,267],[267,269],[269,270],[270,409],[409,291],
-  // lips — inner upper / lower
-  [78,95],[95,88],[88,178],[178,87],[87,14],[14,317],[317,402],[402,318],[318,324],[324,308],
-  [78,191],[191,80],[80,81],[81,82],[82,13],[13,312],[312,311],[311,310],[310,415],[415,308],
-  // left eye
-  [263,249],[249,390],[390,373],[373,374],[374,380],[380,381],[381,382],[382,362],
-  [263,466],[466,388],[388,387],[387,386],[386,385],[385,384],[384,398],[398,362],
-  // left eyebrow
-  [276,283],[283,282],[282,295],[295,285],
-  [300,293],[293,334],[334,296],[296,336],
-  // right eye
-  [33,7],[7,163],[163,144],[144,145],[145,153],[153,154],[154,155],[155,133],
-  [33,246],[246,161],[161,160],[160,159],[159,158],[158,157],[157,173],[173,133],
-  // right eyebrow
-  [46,53],[53,52],[52,65],[65,55],
-  [70,63],[63,105],[105,66],[66,107],
-  // face oval
-  [10,338],[338,297],[297,332],[332,284],[284,251],[251,389],[389,356],[356,454],[454,323],
-  [323,361],[361,288],[288,397],[397,365],[365,379],[379,378],[378,400],[400,377],[377,152],
-  [152,148],[148,176],[176,149],[149,150],[150,136],[136,172],[172,58],[58,132],[132,93],
-  [93,234],[234,127],[127,162],[162,21],[21,54],[54,103],[103,67],[67,109],[109,10],
-];
-const R_FACE_SEG = 0.004;
 
 // ─── shared temporaries (never used concurrently) ──────────────────────────
 const _v2 = new THREE.Vector3();
@@ -134,19 +109,14 @@ function placeSph(mesh: THREE.Mesh, p: THREE.Vector3 | null): void {
 
 export interface SkeletonViewportProps {
   debugLandmarksRef: MutableRefObject<DebugLandmarks>;
-  /** Smoothed mocap frame — read every render tick for expression values
-   *  (blinks, jaw open, tongue) to animate the mannequin face. */
-  frameRef: MutableRefObject<MocapFrame | null>;
   mirror: boolean;
 }
 
 export function SkeletonViewport({
   debugLandmarksRef,
-  frameRef,
   mirror,
 }: SkeletonViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const diagRef      = useRef<HTMLDivElement | null>(null);
   const mirrorRef    = useRef(mirror);
   mirrorRef.current  = mirror;
   const aspectRef    = useRef(1);
@@ -194,15 +164,9 @@ export function SkeletonViewport({
     scene.add(grid);
 
     // ── materials
-    const matL     = new THREE.MeshLambertMaterial({ color: 0x4477cc }); // blue  = left
-    const matR     = new THREE.MeshLambertMaterial({ color: 0xcc3344 }); // red   = right
-    const matC     = new THREE.MeshLambertMaterial({ color: 0xd4b080 }); // tan   = centre
-    // Face features use depthTest:false so they always appear in front of body
-    // geometry — in a diagnostic tool, guaranteed visibility beats occlusion realism.
-    const matFace      = new THREE.MeshLambertMaterial({ color: 0x66bbff, depthTest: false }); // sky-blue  = iris / eyes
-    const matMouth     = new THREE.MeshLambertMaterial({ color: 0xff7755, depthTest: false }); // coral     = mouth outline
-    const matMouthOpen = new THREE.MeshLambertMaterial({ color: 0x220008, depthTest: false }); // dark red  = mouth interior
-    const matTongue    = new THREE.MeshLambertMaterial({ color: 0xff7799, depthTest: false }); // pink      = tongue
+    const matL = new THREE.MeshLambertMaterial({ color: 0x4477cc }); // blue = left
+    const matR = new THREE.MeshLambertMaterial({ color: 0xcc3344 }); // red  = right
+    const matC = new THREE.MeshLambertMaterial({ color: 0xd4b080 }); // tan  = centre
 
     // ── body radii (world units; full-body height ≈ 0.8 world units)
     const R_HEAD  = 0.045;
@@ -245,29 +209,6 @@ export function SkeletonViewport({
     const hLJoints = Array.from({ length: 21 }, () => mkS(R_HAND_JNT, matL));
     const hRJoints = Array.from({ length: 21 }, () => mkS(R_HAND_JNT, matR));
 
-    // ── face contour cylinders (one per FACE_SEGS entry, same material as iris)
-    const faceCyls = FACE_SEGS.map(() => {
-      const m = mkC(R_FACE_SEG, matFace);
-      m.frustumCulled = false;
-      return m;
-    });
-
-    // ── face features
-    // Iris spheres: position from face mesh lm 468/473; scale.y drives blink
-    // (sphere squashes to a flat horizontal disc when eye is closed).
-    const mIrisL     = mkS(0.014, matFace);
-    const mIrisR     = mkS(0.014, matFace);
-    // Nose tip
-    const mNoseTip   = mkS(0.010, matFace);
-    // Mouth outline (corner-to-corner, lm 61→291)
-    const mMouth     = mkC(0.007, matMouth);
-    // Mouth opening interior (upper-lip lm 13 → lower-lip lm 14).
-    // The gap between these landmarks naturally grows as the jaw opens —
-    // no blendshape needed; the raw landmark positions drive it directly.
-    const mMouthOpen = mkC(0.010, matMouthOpen);
-    // Tongue — appears below the lower lip when the tongueOut blendshape fires.
-    const mTongue    = mkS(0.009, matTongue);
-
     const bodyMeshes: THREE.Mesh[] = [
       mHead, mNeck, mTorso,
       mUArmL, mLArmL, mHandL, mULegL, mLLegL, mFootL,
@@ -278,15 +219,9 @@ export function SkeletonViewport({
     const handMeshes: THREE.Mesh[] = [
       ...hLCyls, ...hRCyls, ...hLJoints, ...hRJoints,
     ];
-    const faceMeshes: THREE.Mesh[] = [
-      mIrisL, mIrisR, mNoseTip, mMouth, mMouthOpen, mTongue, ...faceCyls,
-    ];
-    const allMeshes = [...bodyMeshes, ...handMeshes, ...faceMeshes];
+    const allMeshes = [...bodyMeshes, ...handMeshes];
 
     for (const m of allMeshes) { m.visible = false; scene.add(m); }
-    // Face features always draw after the body so depthTest:false reads as
-    // "on top of everything" rather than "randomly z-sorted".
-    for (const m of faceMeshes) m.renderOrder = 1;
 
     // ── persistence cache
     // Last visible NormalizedLandmark per pose index. When visibility drops
@@ -295,14 +230,10 @@ export function SkeletonViewport({
     const lastLm: (NormalizedLandmark | null)[] = new Array(35).fill(null);
 
     let disposed = false;
-    let frameN = 0;
-    let lastErr: string | null = null;
-    let diagPose = false, diagFace = 0, diagCyls = 0;
 
     renderer.setAnimationLoop(() => {
       if (disposed) return;
-      frameN++;
-      try {
+
       const pose = debugLandmarksRef.current.pose;
       const mx   = mirrorRef.current ? -1 : 1;
       const asp  = aspectRef.current;
@@ -325,7 +256,7 @@ export function SkeletonViewport({
         if (!a || !b) return null;
         return midW(a, b, mx, asp);
       };
-      // World pos for hand / face landmarks (no visibility field — always show).
+      // World pos for hand landmarks (no visibility field — always show).
       const WL = (lms: NormalizedLandmark[] | null, i: number): THREE.Vector3 | null => {
         const lm = lms?.[i];
         return lm ? lmW(lm, mx, asp) : null;
@@ -376,101 +307,8 @@ export function SkeletonViewport({
         placeSph(hRJoints[j], WL(rHand, j));
       }
 
-      // ── face features (MediaPipe face mesh: 468 landmarks + 10 iris)
-      //   468 = left iris centre, 473 = right iris centre
-      //   4   = nose tip, 61/291 = mouth corners, 13/14 = upper/lower lip centre
-      //
-      //   All body geometry sits at world_z ≈ 0-0.1. Pinning face features to
-      //   z=0.5 puts them between the body and the camera (z=5) so they are
-      //   never occluded; depthTest:false on their material removes the last risk.
-      const face = debugLandmarksRef.current.face;
-      const FACE_Z = 0.5; // constant — well in front of all body parts
-      const WF = (lms: NormalizedLandmark[] | null, i: number): THREE.Vector3 | null => {
-        const lm = lms?.[i];
-        if (!lm) return null;
-        return new THREE.Vector3(mx * (lm.x - 0.5) * asp, -(lm.y - 0.5), FACE_Z);
-      };
-
-      // Static face landmarks (position only)
-      placeSph(mNoseTip, WF(face,   4));
-      placeCyl(mMouth,   WF(face,  61), WF(face, 291));
-
-      // Iris: position + blink animation (scale.y squashes sphere → flat disc)
-      placeSph(mIrisL, WF(face, 468));
-      placeSph(mIrisR, WF(face, 473));
-      const exprs  = frameRef.current?.expressions;
-      const blinkL = exprs?.blinkLeft ?? 0;
-      const blinkR = exprs?.blinkRight ?? 0;
-      // reset x/z scale each frame (only y is animated)
-      mIrisL.scale.x = mIrisL.scale.z = 1;
-      mIrisR.scale.x = mIrisR.scale.z = 1;
-      mIrisL.scale.y = mIrisL.visible ? Math.max(0.07, 1 - blinkL * 0.93) : 1;
-      mIrisR.scale.y = mIrisR.visible ? Math.max(0.07, 1 - blinkR * 0.93) : 1;
-
-      // Mouth opening: cylinder between upper-lip (lm 13) and lower-lip (lm 14).
-      // These landmarks separate naturally as the jaw opens — no blendshape needed.
-      placeCyl(mMouthOpen, WF(face, 13), WF(face, 14));
-
-      // Tongue: appears below lower lip when the tongueOut blendshape fires.
-      const tongueOut = exprs?.tongueOut ?? 0;
-      if (tongueOut > 0.25 && face) {
-        const lowerLip = WF(face, 14);
-        if (lowerLip) {
-          const tp = lowerLip.clone();
-          tp.y -= 0.020 * tongueOut; // protrudes below lower lip
-          placeSph(mTongue, tp);
-        } else {
-          mTongue.visible = false;
-        }
-      } else {
-        mTongue.visible = false;
-      }
-
-      // face contour connections — same WF() helper, same FACE_Z plane
-      for (let s = 0; s < FACE_SEGS.length; s++) {
-        const [a, b] = FACE_SEGS[s];
-        placeCyl(faceCyls[s], WF(face, a), WF(face, b));
-      }
-
-      // diagnostic snapshot (read by the status interval below)
-      diagPose = !!(pose && pose.some((p) => (p.visibility ?? 1) >= MIN_VIS));
-      diagFace = face ? face.length : 0;
-      diagCyls = faceCyls.reduce((n, m) => n + (m.visible ? 1 : 0), 0);
-      } catch (e) {
-        // A data-dependent error must never permanently kill the animation
-        // loop — three.js stops re-requesting frames if the callback throws,
-        // which would freeze the entire viewport (body + hands + face). Swallow
-        // it, surface it on the diagnostic badge, and keep rendering.
-        lastErr = e instanceof Error ? e.message : String(e);
-      }
-
-      try {
-        renderer.render(scene, camera);
-      } catch (e) {
-        lastErr = "render: " + (e instanceof Error ? e.message : String(e));
-      }
+      renderer.render(scene, camera);
     });
-
-    // ── live diagnostic readout — runs on its own interval, not inside the
-    //    render loop, so a frozen loop is detectable (frame counter stops).
-    let prevFrameN = 0;
-    let prevTime = performance.now();
-    const diagTimer = window.setInterval(() => {
-      const el = diagRef.current;
-      if (!el) return;
-      const now = performance.now();
-      const df  = frameN - prevFrameN;
-      const fps = now > prevTime ? df / ((now - prevTime) / 1000) : 0;
-      prevFrameN = frameN;
-      prevTime   = now;
-      const alive = df > 0;
-      el.textContent =
-        `loop ${alive ? "●" : "✕ frozen"} ${fps.toFixed(0)}fps · ` +
-        `pose ${diagPose ? "Y" : "–"} · face ${diagFace} · ` +
-        `cyls ${diagCyls}/${FACE_SEGS.length}` +
-        (lastErr ? ` · ERR ${lastErr}` : "");
-      el.style.color = lastErr ? "#ff6b6b" : alive ? "" : "#ffb86c";
-    }, 250);
 
     // ── resize: keep orthographic frustum matched to container aspect ratio
     const onResize = () => {
@@ -488,14 +326,11 @@ export function SkeletonViewport({
 
     return () => {
       disposed = true;
-      window.clearInterval(diagTimer);
       ro.disconnect();
       renderer.setAnimationLoop(null);
       renderer.dispose();
       renderer.domElement.remove();
       matL.dispose(); matR.dispose(); matC.dispose();
-      matFace.dispose(); matMouth.dispose();
-      matMouthOpen.dispose(); matTongue.dispose();
       for (const m of allMeshes) m.geometry.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -508,7 +343,6 @@ export function SkeletonViewport({
         <span style={{ color: "#4477cc" }}>blue=left</span> ·{" "}
         <span style={{ color: "#cc3344" }}>red=right</span>
       </div>
-      <div ref={diagRef} className="viewport-diag" />
     </div>
   );
 }
