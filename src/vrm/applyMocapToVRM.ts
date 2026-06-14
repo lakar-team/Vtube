@@ -1,31 +1,27 @@
 import * as THREE from "three";
 import type { VRM, VRMHumanBoneName } from "@pixiv/three-vrm";
 import {
-  ARM_KEYS,
-  FINGER_SEGMENTS,
   type EulerRotation,
-  type HandRotations,
   type MocapFrame,
 } from "../mocap/types";
 import type { ExpressionMapping } from "./expressionMap";
 
 /**
- * Rig mapping layer: smoothed Kalidokit output -> three-vrm humanoid.
+ * Face-tracking application layer: mocap face data -> three-vrm humanoid.
  *
- * We drive the NORMALIZED humanoid bones (`getNormalizedBoneNode`), which
- * three-vrm exposes in a rest-pose-identity space with world-aligned axes.
+ * Only head/neck rotation, eye gaze, and expressions are driven. Body bones
+ * remain in rest pose — the skeleton mannequin (SkeletonViewport) handles
+ * full-body mocap visualization.
  *
- * COORDINATE QUIRK (this is the fix for "the avatar moves opposite to me"):
- * the normalized rig's axes are world-aligned in the model's AUTHORED
+ * COORDINATE QUIRK (VRM 0.x vs 1.0):
+ * The normalized rig's axes are world-aligned in the model's AUTHORED
  * orientation. VRM 0.x models are authored facing the opposite direction to
  * VRM 1.0 models — `VRMUtils.rotateVRM0()` compensates by spinning
- * `vrm.scene` 180°, but that's a parent transform; it does NOT change what a
- * local bone rotation means. Kalidokit's euler conventions come from its
- * original demos that drove raw VRM0 bones, so:
- *   - VRM 0.x model: apply Kalidokit rotations as-is        (signs 1, 1, 1)
+ * `vrm.scene` 180°, but that's a parent transform and does NOT change what
+ * a local bone rotation means. Kalidokit's euler conventions come from its
+ * original VRM0 demos, so:
+ *   - VRM 0.x model: apply rotations as-is        (signs 1, 1, 1)
  *   - VRM 1.0 model: conjugate by the 180° flip — negate x/z (signs -1, 1, -1)
- * Using one hardcoded sign set inverts pitch/roll (arms swing down when you
- * raise them) on models of the other version.
  */
 export interface RotationSigns {
   x: 1 | -1;
@@ -47,92 +43,21 @@ export function getRotationSigns(vrm: VRM): RotationSigns {
   return signs;
 }
 
-/** Per-frame slerp factors (final response feel; One Euro already smoothed). */
-export const RIG_LERP = {
-  head: 0.7,
-  body: 0.5,
-  hips: 0.4,
-  legs: 0.5,
-  wrist: 0.55,
-  armRelaxReturn: 0.07, // ease-back speed when pose tracking drops out
-  legRelaxReturn: 0.08, // ease-back speed when legs drop out of frame
-  fingers: 0.6,
-  fingerRelaxReturn: 0.1, // ease-back speed when a hand drops out of frame
-} as const;
-
 /** How much of the solved head rotation goes to head vs neck bone. */
 export const HEAD_NECK_SPLIT = 0.65;
-
-/** Damp spine yaw/roll — webcam shoulder-line estimates are coarse. */
-export const SPINE_DAMP = 0.4;
-
-/**
- * Torso pitch (bowing) is solved geometrically from the hip->shoulder vector
- * (see kalidokitAdapter) and is much steadier than yaw/roll, so it passes
- * through nearly whole — a real bow should read as a bow.
- */
-export const SPINE_PITCH_DAMP = 0.85;
-
-/**
- * The solved torso rotation is distributed up the spine chain so a bow bends
- * the whole upper body instead of hinging at a single joint. Weights sum to
- * 1 and are renormalized over the bones this model actually has (chest and
- * upperChest are optional in the VRM humanoid spec).
- */
-export const SPINE_CHAIN: ReadonlyArray<readonly [VRMHumanBoneName, number]> = [
-  ["spine", 0.45],
-  ["chest", 0.35],
-  ["upperChest", 0.2],
-];
-
-/** Damp hip rotation — same reasoning as the spine. */
-export const HIPS_ROT_DAMP = 0.6;
-
-/**
- * Meters of hip translation per unit of solver position offset.
- * The solver units are rough (image-space fractions / spine-length deltas),
- * so these are tuned for plausible sway/crouch/step motion, not metric
- * accuracy. z is the depth proxy — see kalidokitAdapter / calibration.
- */
-export const HIPS_POS_SCALE = { x: 0.6, y: 0.8, z: 0.7 } as const;
-
-/** Clamp hip translation (meters) so a bad solve can't fling the avatar. */
-export const HIPS_POS_LIMIT = { x: 0.5, y: 0.6, z: 0.6 } as const;
 
 /** How far (in meters, at ~1 m) the gaze target swings per unit of pupil. */
 export const GAZE_SWING = { x: 0.6, y: 0.35 } as const;
 
-/**
- * Relaxed upper-arm drop used when an arm (or the whole pose) is untracked:
- * arms down at the sides instead of the T-pose. The angle is in Kalidokit
- * convention (left arm drops with +z there) and goes through the same
- * per-model sign mapping as live tracking. Lower arm relaxes to identity.
- */
-const RELAXED_UPPER_ARM_Z = { left: 1.2, right: -1.2 } as const;
-
-const LEG_BONES: VRMHumanBoneName[] = [
-  "leftUpperLeg",
-  "leftLowerLeg",
-  "rightUpperLeg",
-  "rightLowerLeg",
-];
-
 // Scratch objects (avoid per-frame allocation).
 const _euler = new THREE.Euler();
 const _quat = new THREE.Quaternion();
-const _identityQuat = new THREE.Quaternion();
-const _vec3 = new THREE.Vector3();
-const _spineRot: EulerRotation = { x: 0, y: 0, z: 0 };
-
-/** Rest-pose local position of the normalized hips node, cached per model. */
-const restHipsPosCache = new WeakMap<VRM, THREE.Vector3>();
 
 function rotateBone(
   vrm: VRM,
   signs: RotationSigns,
   bone: VRMHumanBoneName,
   rot: EulerRotation,
-  lerp: number,
   scale = 1,
 ): void {
   const node = vrm.humanoid.getNormalizedBoneNode(bone);
@@ -144,190 +69,28 @@ function rotateBone(
     "XYZ",
   );
   _quat.setFromEuler(_euler);
-  node.quaternion.slerp(_quat, lerp);
-}
-
-function easeBoneToward(
-  vrm: VRM,
-  bone: VRMHumanBoneName,
-  target: THREE.Quaternion,
-  lerp: number,
-): void {
-  const node = vrm.humanoid.getNormalizedBoneNode(bone);
-  if (!node) return;
-  node.quaternion.slerp(target, lerp);
-}
-
-/** Ease one arm toward the relaxed at-the-side pose. */
-function relaxArm(
-  vrm: VRM,
-  signs: RotationSigns,
-  side: "left" | "right",
-  lerp: number,
-): void {
-  _euler.set(0, 0, RELAXED_UPPER_ARM_Z[side] * signs.z, "XYZ");
-  _quat.setFromEuler(_euler);
-  easeBoneToward(vrm, `${side}UpperArm` as VRMHumanBoneName, _quat, lerp);
-  easeBoneToward(vrm, `${side}LowerArm` as VRMHumanBoneName, _identityQuat, lerp);
+  node.quaternion.copy(_quat);
 }
 
 /**
- * Apply one hand's solved finger rotations to the VRM's finger bones.
- * Bone names are `${side}${SegmentPascalCase}`, e.g. "leftThumbMetacarpal",
- * "rightIndexIntermediate" — part of the VRM humanoid spec, so this works on
- * any VRM-compliant rig that has finger bones. Bones the model doesn't have
- * (`getNormalizedBoneNode` returns null) are silently skipped.
- */
-function applyHand(
-  vrm: VRM,
-  signs: RotationSigns,
-  side: "left" | "right",
-  hand: HandRotations | null,
-  wrist: EulerRotation | null,
-  fingersLerp: number,
-  fingerRelaxReturn: number,
-  wristLerp: number,
-): void {
-  for (const segment of FINGER_SEGMENTS) {
-    const boneName = (side + segment[0].toUpperCase() + segment.slice(1)) as VRMHumanBoneName;
-    const rot = hand?.[segment];
-    if (rot) {
-      rotateBone(vrm, signs, boneName, rot, fingersLerp);
-    } else {
-      // Hand not tracked / segment not solved: ease back to the rest pose
-      // (identity in normalized bone space) instead of freezing.
-      easeBoneToward(vrm, boneName, _identityQuat, fingerRelaxReturn);
-    }
-  }
-
-  const wristBone = (side + "Hand") as VRMHumanBoneName;
-  if (wrist) {
-    rotateBone(vrm, signs, wristBone, wrist, wristLerp);
-  } else {
-    easeBoneToward(vrm, wristBone, _identityQuat, fingerRelaxReturn);
-  }
-}
-
-/**
- * Apply one smoothed mocap frame to the VRM.
+ * Apply one smoothed mocap frame to the VRM (face channels only).
  * Call once per render frame, BEFORE `vrm.update(delta)`.
  *
  * @param lookAtTarget an Object3D parented to the camera; the VRM's lookAt
  *   target. We move it around to drive eye gaze.
- * @param direct When true, all rig-layer lerps snap to 1.0 (no additional lag
- *   beyond the smoother) and all dampening constants are removed, so the avatar
- *   responds in real time to the mocap data.
  */
 export function applyMocapToVRM(
   vrm: VRM,
   frame: MocapFrame,
   lookAtTarget: THREE.Object3D | null,
   expressionMap?: ExpressionMapping,
-  direct = false,
 ): void {
   const signs = getRotationSigns(vrm);
 
-  // In direct mode every bone snaps to its target immediately — the smoother
-  // already handles anti-jitter, so an additional per-frame lerp only adds lag.
-  const headLerp     = direct ? 1.0 : RIG_LERP.head;
-  const bodyLerp     = direct ? 1.0 : RIG_LERP.body;
-  const hipsLerp     = direct ? 1.0 : RIG_LERP.hips;
-  const legsLerp     = direct ? 1.0 : RIG_LERP.legs;
-  const wristLerp    = direct ? 1.0 : RIG_LERP.wrist;
-  const fingersLerp  = direct ? 1.0 : RIG_LERP.fingers;
-  const relaxReturn  = direct ? 0.4  : RIG_LERP.armRelaxReturn;
-  const legRelax     = direct ? 0.4  : RIG_LERP.legRelaxReturn;
-  const fingerRelax  = direct ? 0.4  : RIG_LERP.fingerRelaxReturn;
-
-  // Dampening: direct mode passes solved rotations through at full amplitude.
-  const spinePitchDamp = direct ? 1.0 : SPINE_PITCH_DAMP;
-  const spineYZDamp    = direct ? 1.0 : SPINE_DAMP;
-  const hipsRotDamp    = direct ? 1.0 : HIPS_ROT_DAMP;
-
   // ---- head / neck (face solve)
   if (frame.faceTracked) {
-    rotateBone(vrm, signs, "head", frame.head, headLerp, HEAD_NECK_SPLIT);
-    rotateBone(vrm, signs, "neck", frame.head, headLerp, 1 - HEAD_NECK_SPLIT);
-  }
-
-  // ---- torso + arms (pose solve)
-  if (frame.poseTracked) {
-    _spineRot.x = frame.spine.x * spinePitchDamp;
-    _spineRot.y = frame.spine.y * spineYZDamp;
-    _spineRot.z = frame.spine.z * spineYZDamp;
-    let chainWeight = 0;
-    for (const [bone, weight] of SPINE_CHAIN) {
-      if (vrm.humanoid.getNormalizedBoneNode(bone)) chainWeight += weight;
-    }
-    for (const [bone, weight] of SPINE_CHAIN) {
-      rotateBone(vrm, signs, bone, _spineRot, bodyLerp, weight / (chainWeight || 1));
-    }
-    rotateBone(vrm, signs, "hips", frame.hips.rotation, hipsLerp, hipsRotDamp);
-    // Arms gate individually: a hand shoved at the lens occludes its own arm
-    // and MediaPipe hallucinates the hidden joints — that side eases to the
-    // relaxed pose while the visible arm keeps tracking.
-    if (frame.armsTracked.left) {
-      rotateBone(vrm, signs, "leftUpperArm", frame.arms.leftUpperArm, bodyLerp);
-      rotateBone(vrm, signs, "leftLowerArm", frame.arms.leftLowerArm, bodyLerp);
-    } else {
-      relaxArm(vrm, signs, "left", relaxReturn);
-    }
-    if (frame.armsTracked.right) {
-      rotateBone(vrm, signs, "rightUpperArm", frame.arms.rightUpperArm, bodyLerp);
-      rotateBone(vrm, signs, "rightLowerArm", frame.arms.rightLowerArm, bodyLerp);
-    } else {
-      relaxArm(vrm, signs, "right", relaxReturn);
-    }
-  } else {
-    // No pose: ease the arms down to a natural resting pose and straighten
-    // the torso instead of freezing mid-bend.
-    relaxArm(vrm, signs, "left", relaxReturn);
-    relaxArm(vrm, signs, "right", relaxReturn);
-    for (const [bone] of SPINE_CHAIN) {
-      easeBoneToward(vrm, bone, _identityQuat, relaxReturn);
-    }
-  }
-
-  // ---- legs (pose solve, gated on lower-body visibility)
-  if (frame.legsTracked) {
-    rotateBone(vrm, signs, "leftUpperLeg", frame.legs.leftUpperLeg, legsLerp);
-    rotateBone(vrm, signs, "leftLowerLeg", frame.legs.leftLowerLeg, legsLerp);
-    rotateBone(vrm, signs, "rightUpperLeg", frame.legs.rightUpperLeg, legsLerp);
-    rotateBone(vrm, signs, "rightLowerLeg", frame.legs.rightLowerLeg, legsLerp);
-  } else {
-    // Legs out of frame / disabled: ease back to standing (identity).
-    for (const bone of LEG_BONES) {
-      easeBoneToward(vrm, bone, _identityQuat, legRelax);
-    }
-  }
-
-  // ---- hip translation (sway / crouch / step; depth via the z proxy)
-  // frame.hips.position is zero unless body calibration captured a reference
-  // standing position (see calibration.ts), so uncalibrated users keep the
-  // avatar planted at the origin.
-  {
-    const node = vrm.humanoid.getNormalizedBoneNode("hips");
-    if (node) {
-      let rest = restHipsPosCache.get(vrm);
-      if (!rest) {
-        // First frame: the node still holds its rest-pose local position.
-        rest = node.position.clone();
-        restHipsPosCache.set(vrm, rest);
-      }
-      const p = frame.hips.position;
-      const clampAbs = (v: number, lim: number) => (v < -lim ? -lim : v > lim ? lim : v);
-      // Positions don't conjugate like rotations under the VRM0/VRM1 180°
-      // flip: the solver's lateral x is mirror-frame (flips with the model's
-      // authored facing, same as rotation x), but its depth z is
-      // camera-relative ("toward the viewer"), so the model-local z sign is
-      // the OPPOSITE of the rotation z sign. y (up) is version-independent.
-      _vec3.set(
-        rest.x + clampAbs(p.x * HIPS_POS_SCALE.x, HIPS_POS_LIMIT.x) * signs.x,
-        rest.y + clampAbs(p.y * HIPS_POS_SCALE.y, HIPS_POS_LIMIT.y),
-        rest.z + clampAbs(p.z * HIPS_POS_SCALE.z, HIPS_POS_LIMIT.z) * -signs.z,
-      );
-      node.position.lerp(_vec3, hipsLerp);
-    }
+    rotateBone(vrm, signs, "head", frame.head, HEAD_NECK_SPLIT);
+    rotateBone(vrm, signs, "neck", frame.head, 1 - HEAD_NECK_SPLIT);
   }
 
   // ---- expressions (blink, vowels, full ARKit blendshapes if supported)
@@ -338,10 +101,6 @@ export function applyMocapToVRM(
     }
   }
 
-  // ---- fingers + wrists (hand solve)
-  applyHand(vrm, signs, "left",  frame.hands.left,  frame.hands.leftWrist,  fingersLerp, fingerRelax, wristLerp);
-  applyHand(vrm, signs, "right", frame.hands.right, frame.hands.rightWrist, fingersLerp, fingerRelax, wristLerp);
-
   // ---- eye gaze via lookAt target
   if (lookAtTarget && frame.faceTracked) {
     lookAtTarget.position.set(
@@ -351,4 +110,3 @@ export function applyMocapToVRM(
     );
   }
 }
-

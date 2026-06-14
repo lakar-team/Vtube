@@ -7,7 +7,7 @@ import type {
 } from "@mediapipe/tasks-vision";
 import { createLandmarkers, type Landmarkers } from "./landmarkers";
 import { solveMocapFrame } from "./kalidokitAdapter";
-import { directSmoothFrame, FilterBank, smoothFrame } from "./smoothing";
+import { directSmoothFrame, FilterBank } from "./smoothing";
 import type { DebugLandmarks, MocapFrame } from "./types";
 
 export type MocapStatus = "idle" | "loading" | "running" | "error";
@@ -61,7 +61,6 @@ export function useMocap(
     mirror: boolean;
     trackLegs: boolean;
     enabled: boolean;
-    directMode: boolean;
   },
 ): UseMocapResult {
   const frameRef = useRef<MocapFrame | null>(null);
@@ -80,9 +79,6 @@ export function useMocap(
   mirrorRef.current = options.mirror;
   const trackLegsRef = useRef(options.trackLegs);
   trackLegsRef.current = options.trackLegs;
-  const directModeRef = useRef(options.directMode);
-  directModeRef.current = options.directMode;
-
   const bankRef = useRef<FilterBank>(new FilterBank());
 
   useEffect(() => {
@@ -155,10 +151,7 @@ export function useMocap(
       rawFrameRef.current = raw;
       debugLandmarksRef.current = debug;
 
-      // Smooth (direct mode: near-passthrough filter, no slew limits)
-      frameRef.current = directModeRef.current
-        ? directSmoothFrame(bankRef.current, raw)
-        : smoothFrame(bankRef.current, raw);
+      frameRef.current = directSmoothFrame(bankRef.current, raw);
 
       // --- fps + HUD state at 4 Hz
       frameCount++;

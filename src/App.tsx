@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { WebcamView } from "./components/WebcamView";
-import { AvatarViewport, type ViewMode, type TrackingMode } from "./components/AvatarViewport";
+import { AvatarViewport, type ViewMode } from "./components/AvatarViewport";
 import { SkeletonViewport } from "./components/SkeletonViewport";
 import { DebugHUD } from "./components/DebugHUD";
 import { useWebcam } from "./hooks/useWebcam";
@@ -8,20 +8,7 @@ import { useMocap } from "./mocap/useMocap";
 import type { ExpressionMapping } from "./vrm/expressionMap";
 
 type DisplayMode = "avatar" | "skeleton" | "both";
-const DISPLAY_MODE_KEY   = "vtube.displayMode";
-const TRACKING_MODE_KEY  = "vtube.trackingMode";
-
-function loadTrackingMode(): TrackingMode {
-  try {
-    const v = localStorage.getItem(TRACKING_MODE_KEY) as TrackingMode | null;
-    if (v === "stabilized" || v === "direct" || v === "positional") return v;
-    // Migrate from old boolean directMode key.
-    const old = localStorage.getItem("vtube.directMode");
-    return old === "0" ? "stabilized" : "direct";
-  } catch {
-    return "direct";
-  }
-}
+const DISPLAY_MODE_KEY = "vtube.displayMode";
 
 function loadDisplayMode(): DisplayMode {
   try {
@@ -38,8 +25,7 @@ export default function App() {
   const [mirror, setMirror] = useState(true);
   const [showOverlay, setShowOverlay] = useState(true);
   const [trackLegs, setTrackLegs] = useState(true);
-  const [viewMode, setViewMode] = useState<ViewMode>("full");
-  const [trackingMode, setTrackingMode] = useState<TrackingMode>(loadTrackingMode);
+  const viewMode: ViewMode = "bust";
   const [displayMode, setDisplayMode] = useState<DisplayMode>(loadDisplayMode);
   const [expressionMap, setExpressionMap] = useState<ExpressionMapping | null>(null);
 
@@ -48,14 +34,7 @@ export default function App() {
     mirror,
     trackLegs,
     enabled: webcam.ready,
-    // Both "direct" and "positional" bypass smoothing in the pipeline.
-    directMode: trackingMode !== "stabilized",
   });
-
-  const changeTrackingMode = (v: TrackingMode) => {
-    setTrackingMode(v);
-    try { localStorage.setItem(TRACKING_MODE_KEY, v); } catch { /* privacy mode */ }
-  };
 
   const changeDisplayMode = (v: DisplayMode) => {
     setDisplayMode(v);
@@ -89,38 +68,10 @@ export default function App() {
           <label className="toggle">
             <input
               type="checkbox"
-              checked={viewMode === "full"}
-              onChange={(e) => setViewMode(e.target.checked ? "full" : "bust")}
-            />
-            full-body view
-          </label>
-          <label className="toggle">
-            <input
-              type="checkbox"
               checked={showOverlay}
               onChange={(e) => setShowOverlay(e.target.checked)}
             />
             landmark overlay
-          </label>
-          <label
-            className="toggle"
-            title={
-              "Tracking mode:\n" +
-              "• stabilized — One Euro filter + lerps: smooth, slight lag\n" +
-              "• direct — raw mocap passthrough: responsive, may jitter\n" +
-              "• positional — bypass Kalidokit IK; orient bones directly from\n" +
-              "  landmark positions (same 3D space as the skeleton diagnostic)"
-            }
-          >
-            tracking
-            <select
-              value={trackingMode}
-              onChange={(e) => changeTrackingMode(e.target.value as TrackingMode)}
-            >
-              <option value="stabilized">stabilized</option>
-              <option value="direct">direct</option>
-              <option value="positional">positional</option>
-            </select>
           </label>
           <label
             className="toggle"
@@ -165,11 +116,8 @@ export default function App() {
           <section className="pane">
             <AvatarViewport
               frameRef={mocap.frameRef}
-              debugLandmarksRef={mocap.debugLandmarksRef}
               viewMode={viewMode}
               onExpressionMap={setExpressionMap}
-              trackingMode={trackingMode}
-              mirror={mirror}
             />
           </section>
         )}

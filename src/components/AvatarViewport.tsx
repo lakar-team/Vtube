@@ -11,16 +11,10 @@ import {
   SAMPLE_SKIN_URL,
 } from "../vrm/skin";
 import { applyMocapToVRM } from "../vrm/applyMocapToVRM";
-import { applyJointMatchToVRM, initJointMatchCache } from "../vrm/jointMatchRetarget";
 import type { ExpressionMapping } from "../vrm/expressionMap";
-import type { MocapFrame, DebugLandmarks } from "../mocap/types";
-
-export type TrackingMode = "stabilized" | "direct" | "positional";
+import type { MocapFrame } from "../mocap/types";
 
 export type ViewMode = "bust" | "full";
-
-/** Narrow DebugLandmarks to just the pose array (avoids importing all of DebugLandmarks). */
-type PoseDebugRef = MutableRefObject<DebugLandmarks>;
 
 /** Camera placement per view mode (VRM humanoids stand at the origin). */
 const CAMERA_PRESETS: Record<ViewMode, { pos: [number, number, number]; look: [number, number, number] }> = {
@@ -31,23 +25,11 @@ const CAMERA_PRESETS: Record<ViewMode, { pos: [number, number, number]; look: [n
 export interface AvatarViewportProps {
   /** Smoothed mocap output from useMocap. */
   frameRef: MutableRefObject<MocapFrame | null>;
-  /** Raw MediaPipe landmarks — needed for positional retargeting mode. */
-  debugLandmarksRef?: PoseDebugRef;
   /** Bust-up framing (face/hands detail) or full-body framing (legs). */
   viewMode?: ViewMode;
   /** Called once the VRM loads with its blendshape support summary, for the
    *  debug HUD's "unsupported channels" warning. */
   onExpressionMap?: (mapping: ExpressionMapping) => void;
-  /**
-   * Tracking mode:
-   *  "stabilized" — One Euro filtered + lerped (smooth, slight lag)
-   *  "direct"     — raw frame, lerp=1 (responsive, may jitter)
-   *  "positional" — bypass Kalidokit IK; orient bones directly from landmark
-   *                 positions matching the Skeleton diagnostic mannequin
-   */
-  trackingMode?: TrackingMode;
-  /** Mirror flag — required for correct axis mapping in positional mode. */
-  mirror?: boolean;
 }
 
 type LoadState =
@@ -56,24 +38,15 @@ type LoadState =
   | { phase: "error"; message: string };
 
 /**
- * Three.js viewport: renders the VRM and applies the latest mocap frame on
- * every render tick.
+ * Three.js viewport: renders the VRM and applies the latest face mocap frame
+ * on every render tick. Body bones remain in rest pose.
  */
 export function AvatarViewport({
   frameRef,
-  debugLandmarksRef,
   viewMode = "bust",
   onExpressionMap,
-  trackingMode = "direct",
-  mirror = true,
 }: AvatarViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  // The render loop reads these through refs so prop changes don't re-create the scene.
-  const trackingModeRef = useRef(trackingMode);
-  trackingModeRef.current = trackingMode;
-  const mirrorRef = useRef(mirror);
-  mirrorRef.current = mirror;
-  const aspectRef = useRef(1);
   const [load, setLoad] = useState<LoadState>({ phase: "loading" });
   /** Error from a user model upload — shown without discarding the current model. */
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -115,10 +88,9 @@ export function AvatarViewport({
 
     const scene = new THREE.Scene();
 
-    aspectRef.current = container.clientWidth / Math.max(container.clientHeight, 1);
     const camera = new THREE.PerspectiveCamera(
       27,
-      aspectRef.current,
+      container.clientWidth / Math.max(container.clientHeight, 1),
       0.1,
       30,
     );
@@ -156,7 +128,6 @@ export function AvatarViewport({
       onExpressionMap?.(loaded.expressionMap);
       if (vrm.lookAt) vrm.lookAt.target = lookAtTarget;
       scene.add(vrm.scene);
-      initJointMatchCache(vrm); // measure T-pose rest directions before any frame runs
       setLoad({ phase: "ready", source: loaded.sourceUrl });
       // A new model starts with its own factory textures.
       setSkinActive(false);
@@ -185,7 +156,7 @@ export function AvatarViewport({
             setLoad({
               phase: "error",
               message:
-                "Could not load a VRM model. Use “load VRM…” or drop one at " +
+                "Could not load a VRM model. Use the load VRM button or drop a .vrm at " +
                 "public/models/avatar.vrm. " + message,
             });
           }
@@ -215,24 +186,8 @@ export function AvatarViewport({
       const delta = clock.getDelta();
       if (vrm) {
         const frame = frameRef.current;
-        const mode  = trackingModeRef.current;
         if (frame) {
-          // Always run applyMocapToVRM: handles expressions, lookAt, spring bones,
-          // and spine/head/wrist/finger bones. In positional mode its arm/leg
-          // rotations are immediately overridden below.
-          applyMocapToVRM(
-            vrm,
-            frame,
-            lookAtTarget,
-            expressionMapRef.current,
-            mode !== "stabilized",
-          );
-
-          if (mode === "positional") {
-            const pose = debugLandmarksRef?.current?.pose ?? null;
-            const mx   = mirrorRef.current ? -1 : 1;
-            applyJointMatchToVRM(vrm, pose, mx, aspectRef.current);
-          }
+          applyMocapToVRM(vrm, frame, lookAtTarget, expressionMapRef.current);
         }
         vrm.update(delta);
       }
@@ -242,8 +197,7 @@ export function AvatarViewport({
     const onResize = () => {
       const w = container.clientWidth;
       const h = Math.max(container.clientHeight, 1);
-      aspectRef.current = w / h;
-      camera.aspect = aspectRef.current;
+      camera.aspect = w / h;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
     };
@@ -319,7 +273,7 @@ export function AvatarViewport({
       )}
       {load.phase === "ready" && load.source.startsWith("http") && (
         <div className="viewport-badge">
-          sample model — use “load VRM…” to use your own
+          sample model — use "load VRM…" to use your own
         </div>
       )}
       <div className="viewport-tools">
@@ -343,7 +297,7 @@ export function AvatarViewport({
             className="btn"
             disabled={skinDisabled}
             onClick={onSkinTemplate}
-            title="Download this model's UV layout as a labeled PNG template. Paint it in any image editor, then apply it with “upload…”."
+            title="Download this model's UV layout as a labeled PNG template. Paint it in any image editor, then apply it with the upload button."
           >
             template ⤓
           </button>
