@@ -53,9 +53,16 @@ export async function createLandmarkers(): Promise<Landmarkers> {
     FaceLandmarker.createFromOptions(fileset, {
       baseOptions: {
         modelAssetPath: FACE_MODEL_URL,
-        // Do NOT force GPU delegate here — on some GPUs/browsers the face
-        // model with blendshapes silently returns 0 faces when GPU is forced.
-        // Omitting delegate lets MediaPipe auto-select (GPU → CPU fallback).
+        // Force CPU for the face model. On some GPUs/browsers the face model
+        // with blendshapes silently returns 0 faces on the GPU delegate — and
+        // because it's silent (init succeeds, inference just yields an empty
+        // result) MediaPipe's GPU→CPU auto-fallback never triggers. Leaving the
+        // delegate unset let auto-select pick GPU and hit exactly that trap:
+        // pose/hands (GPU) tracked fine while the face produced no landmarks,
+        // so the skeleton viewport's face overlay never appeared. CPU is the
+        // reliable path; for a single face the few-ms cost is well worth it
+        // (face landmarks + blendshapes are the feature this app depends on).
+        delegate: "CPU",
       },
       runningMode: "VIDEO",
       numFaces: 1,
