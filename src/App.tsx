@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { WebcamView } from "./components/WebcamView";
+import { FaceMeshDebugView } from "./components/FaceMeshDebugView";
 import { AvatarViewport, type ViewMode } from "./components/AvatarViewport";
 import { SkeletonViewport } from "./components/SkeletonViewport";
 import { DebugHUD } from "./components/DebugHUD";
@@ -99,13 +100,18 @@ export default function App() {
       </header>
 
       <main className={`panes${displayMode === "both" ? " panes-three" : ""}`}>
-        <section className="pane">
-          <WebcamView
-            videoRef={videoRef}
-            debugLandmarksRef={mocap.debugLandmarksRef}
-            mirror={mirror}
-            showOverlay={showOverlay}
-          />
+        <section className="pane pane-left">
+          <div className="pane-left-top">
+            <WebcamView
+              videoRef={videoRef}
+              debugLandmarksRef={mocap.debugLandmarksRef}
+              mirror={mirror}
+              showOverlay={showOverlay}
+            />
+          </div>
+          <div className="pane-left-bottom">
+            <FaceMeshDebugView debugLandmarksRef={mocap.debugLandmarksRef} />
+          </div>
           {webcam.error && <div className="pane-error">{webcam.error}</div>}
           {!webcam.ready && !webcam.error && (
             <div className="pane-status">Waiting for camera…</div>

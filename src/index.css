@@ -455,3 +455,23 @@ footer {
 .hud-expr-support strong {
   color: var(--text);
 }
+
+/* Left pane: webcam preview stacked above the face-mesh debug panel */
+.pane-left {
+  display: flex;
+  flex-direction: column;
+}
+
+.pane-left-top {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.pane-left-bottom {
+  position: relative;
+  flex: 0 0 200px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
