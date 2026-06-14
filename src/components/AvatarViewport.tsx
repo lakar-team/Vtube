@@ -3,13 +3,6 @@ import type { MutableRefObject } from "react";
 import * as THREE from "three";
 import type { VRM } from "@pixiv/three-vrm";
 import { disposeVRM, loadVRM, loadVRMFromFile, type LoadedVRM } from "../vrm/loadVRM";
-import {
-  applySkinFromFile,
-  applySkinFromURL,
-  generateSkinTemplate,
-  resetSkin,
-  SAMPLE_SKIN_URL,
-} from "../vrm/skin";
 import { applyMocapToVRM } from "../vrm/applyMocapToVRM";
 import type { ExpressionMapping } from "../vrm/expressionMap";
 import type { MocapFrame } from "../mocap/types";
@@ -50,21 +43,10 @@ export function AvatarViewport({
   const [load, setLoad] = useState<LoadState>({ phase: "loading" });
   /** Error from a user model upload — shown without discarding the current model. */
   const [uploadError, setUploadError] = useState<string | null>(null);
-  /** Custom-skin feature state (separate from VRM loading on purpose). */
-  const [skinError, setSkinError] = useState<string | null>(null);
-  const [skinActive, setSkinActive] = useState(false);
-  const [skinBusy, setSkinBusy] = useState(false);
   const expressionMapRef = useRef<ExpressionMapping | undefined>(undefined);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   /** Set by the scene effect; lets the file picker swap in an uploaded VRM. */
   const loadFileRef = useRef<((file: File) => void) | null>(null);
-  /** Skin actions bound to the live VRM instance inside the scene effect. */
-  const skinRef = useRef<{
-    template: () => Promise<Blob>;
-    applyFile: (file: File) => Promise<void>;
-    applyUrl: (url: string) => Promise<void>;
-    reset: () => void;
-  } | null>(null);
 
   // Reframe the existing camera when the view mode changes.
   useEffect(() => {
@@ -129,9 +111,6 @@ export function AvatarViewport({
       if (vrm.lookAt) vrm.lookAt.target = lookAtTarget;
       scene.add(vrm.scene);
       setLoad({ phase: "ready", source: loaded.sourceUrl });
-      // A new model starts with its own factory textures.
-      setSkinActive(false);
-      setSkinError(null);
     };
 
     const beginLoad = (promise: Promise<LoadedVRM>) => {
@@ -166,21 +145,6 @@ export function AvatarViewport({
     beginLoad(loadVRM());
     loadFileRef.current = (file: File) => beginLoad(loadVRMFromFile(file));
 
-    // Skin actions close over the mutable `vrm` local so they always target
-    // whichever model is currently on stage.
-    const requireVRM = (): VRM => {
-      if (!vrm) throw new Error("The model is still loading.");
-      return vrm;
-    };
-    skinRef.current = {
-      template: () => generateSkinTemplate(requireVRM()),
-      applyFile: (file: File) => applySkinFromFile(requireVRM(), file),
-      applyUrl: (url: string) => applySkinFromURL(requireVRM(), url),
-      reset: () => {
-        if (vrm) resetSkin(vrm);
-      },
-    };
-
     const clock = new THREE.Clock();
     renderer.setAnimationLoop(() => {
       const delta = clock.getDelta();
@@ -207,7 +171,6 @@ export function AvatarViewport({
     return () => {
       disposed = true;
       loadFileRef.current = null;
-      skinRef.current = null;
       cameraRef.current = null;
       resizeObserver.disconnect();
       renderer.setAnimationLoop(null);
@@ -217,51 +180,6 @@ export function AvatarViewport({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  /** Run a skin action with shared busy/error handling. */
-  const runSkinAction = async (action: () => Promise<void>) => {
-    setSkinBusy(true);
-    setSkinError(null);
-    try {
-      await action();
-    } catch (err: unknown) {
-      setSkinError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSkinBusy(false);
-    }
-  };
-
-  const onSkinTemplate = () =>
-    runSkinAction(async () => {
-      const blob = await skinRef.current!.template();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "skin-template.png";
-      a.click();
-      // Give the browser time to start the download before revoking.
-      setTimeout(() => URL.revokeObjectURL(url), 10_000);
-    });
-
-  const onSkinFile = (file: File) =>
-    runSkinAction(async () => {
-      await skinRef.current!.applyFile(file);
-      setSkinActive(true);
-    });
-
-  const onSkinSample = () =>
-    runSkinAction(async () => {
-      await skinRef.current!.applyUrl(SAMPLE_SKIN_URL);
-      setSkinActive(true);
-    });
-
-  const onSkinReset = () => {
-    skinRef.current?.reset();
-    setSkinActive(false);
-    setSkinError(null);
-  };
-
-  const skinDisabled = skinBusy || load.phase !== "ready";
 
   return (
     <div ref={containerRef} className="avatar-viewport">
@@ -291,55 +209,7 @@ export function AvatarViewport({
             }}
           />
         </label>
-        <div className="skin-tools">
-          <span className="skin-tools-label">skin</span>
-          <button
-            className="btn"
-            disabled={skinDisabled}
-            onClick={onSkinTemplate}
-            title="Download this model's UV layout as a labeled PNG template. Paint it in any image editor, then apply it with the upload button."
-          >
-            template ⤓
-          </button>
-          <label
-            className="btn"
-            title="Apply an edited skin template image to the current model."
-            aria-disabled={skinDisabled}
-          >
-            upload…
-            <input
-              type="file"
-              accept="image/png,image/jpeg,image/webp"
-              style={{ display: "none" }}
-              disabled={skinDisabled}
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) onSkinFile(file);
-                e.target.value = "";
-              }}
-            />
-          </label>
-          <button
-            className="btn"
-            disabled={skinDisabled}
-            onClick={onSkinSample}
-            title="Apply the bundled demo skin (made for the default avatar; on other models it will be misaligned)."
-          >
-            sample
-          </button>
-          {skinActive && (
-            <button
-              className="btn"
-              disabled={skinBusy}
-              onClick={onSkinReset}
-              title="Restore the model's original textures."
-            >
-              reset
-            </button>
-          )}
-        </div>
         {uploadError && <div className="viewport-upload-error">{uploadError}</div>}
-        {skinError && <div className="viewport-upload-error">skin: {skinError}</div>}
       </div>
     </div>
   );
