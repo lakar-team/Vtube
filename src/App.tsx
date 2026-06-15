@@ -49,6 +49,13 @@ function loadRoomM(): number {
   }
 }
 
+function loadBool(key: string, d: boolean): boolean {
+  try { const v = localStorage.getItem(key); return v === null ? d : v === "true"; } catch { return d; }
+}
+function loadSmoothAmount(): number {
+  try { const v = Number(localStorage.getItem("vtube.smoothAmount")); return Number.isFinite(v) && v >= 0 && v <= 0.95 ? v : 0.5; } catch { return 0.5; }
+}
+
 export default function App() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
@@ -59,6 +66,11 @@ export default function App() {
   const [displayMode, setDisplayMode] = useState<DisplayMode>(loadDisplayMode);
   const [heightCm, setHeightCm] = useState<number>(loadHeightCm);
   const [roomM, setRoomM] = useState<number>(loadRoomM);
+  const [persistPose, setPersistPose] = useState(() => loadBool("vtube.persistPose", true));
+  const [persistHands, setPersistHands] = useState(() => loadBool("vtube.persistHands", true));
+  const [persistFace, setPersistFace] = useState(() => loadBool("vtube.persistFace", true));
+  const [smoothing, setSmoothing] = useState(() => loadBool("vtube.smoothing", false));
+  const [smoothAmount, setSmoothAmount] = useState(loadSmoothAmount);
   const [rigConfig, setRigConfig] = useState<RigConfig>(loadRigConfig);
   const rigConfigRef = useRef(rigConfig);
   rigConfigRef.current = rigConfig;
@@ -88,6 +100,16 @@ export default function App() {
     setRoomM(v);
     try { localStorage.setItem(ROOM_KEY, String(v)); } catch { /* privacy mode */ }
   };
+
+  const setBoolPersisted = (key: string, setter: (v: boolean) => void, v: boolean) => {
+    setter(v);
+    try { localStorage.setItem(key, String(v)); } catch { /* privacy mode */ }
+  };
+  const changeSmoothAmount = (v: number) => {
+    setSmoothAmount(v);
+    try { localStorage.setItem("vtube.smoothAmount", String(v)); } catch { /* privacy mode */ }
+  };
+  const lmOpts = { persistPose, persistHands, persistFace, smoothing, smoothAmount };
 
   // ── one-time scale capture: 5s countdown, then snapshot proportions once.
   const startCapture = () => {
@@ -218,6 +240,17 @@ export default function App() {
           >
             {countdown !== null ? `capturing… ${countdown}` : "capture scale"}
           </button>
+          <span className="toggle persist-group" title="Hold the last-known landmarks briefly when tracking drops, instead of snapping to default.">
+            persist:
+            <label className="mini"><input type="checkbox" checked={persistPose} onChange={(e) => setBoolPersisted("vtube.persistPose", setPersistPose, e.target.checked)} /> pose</label>
+            <label className="mini"><input type="checkbox" checked={persistHands} onChange={(e) => setBoolPersisted("vtube.persistHands", setPersistHands, e.target.checked)} /> hands</label>
+            <label className="mini"><input type="checkbox" checked={persistFace} onChange={(e) => setBoolPersisted("vtube.persistFace", setPersistFace, e.target.checked)} /> face</label>
+          </span>
+          <label className="toggle" title="Temporal smoothing (EMA) of landmark positions to reduce jitter.">
+            <input type="checkbox" checked={smoothing} onChange={(e) => setBoolPersisted("vtube.smoothing", setSmoothing, e.target.checked)} />
+            smooth
+            <input type="range" min={0} max={0.9} step={0.05} value={smoothAmount} disabled={!smoothing} onChange={(e) => changeSmoothAmount(Number(e.target.value))} style={{ width: "4em" }} />
+          </label>
         </div>
       </header>
 
@@ -258,6 +291,7 @@ export default function App() {
               rigConfig={rigConfig}
               mirror={mirror}
               roomM={roomM}
+              lmOpts={lmOpts}
             />
           </section>
         )}
@@ -271,6 +305,7 @@ export default function App() {
                 rigConfig={rigConfig}
                 mirror={mirror}
                 roomM={roomM}
+                lmOpts={lmOpts}
               />
             </div>
             <RigTuner rig={rigConfig} onChange={changeRigField} onReset={resetRig} />

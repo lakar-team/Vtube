@@ -71,6 +71,22 @@ body {
   user-select: none;
 }
 
+.persist-group {
+  gap: 8px;
+  font-size: 11px;
+}
+
+.persist-group .mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+}
+
+.persist-group .mini input {
+  margin: 0;
+}
+
 .btn {
   background: var(--panel);
   border: 1px solid var(--border);

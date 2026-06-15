@@ -103,6 +103,16 @@ interface HandRig {
   bPos: Float32Array;
 }
 
+/** Landmark persistence (hold-last-good) + temporal smoothing options. */
+export interface LandmarkOptions {
+  persistPose: boolean;
+  persistHands: boolean;
+  persistFace: boolean;
+  smoothing: boolean;
+  /** 0 = none … ~0.9 = heavy (EMA amount). */
+  smoothAmount: number;
+}
+
 export interface RoomViewportProps {
   debugLandmarksRef: MutableRefObject<DebugLandmarks>;
   /** Smoothed mocap frame — read for eye gaze (pupil). */
@@ -112,6 +122,8 @@ export interface RoomViewportProps {
   mirror: boolean;
   /** Room cube side length (meters). */
   roomM: number;
+  /** Per-stream persistence + smoothing. */
+  lmOpts: LandmarkOptions;
 }
 
 export function RoomViewport({
@@ -120,6 +132,7 @@ export function RoomViewport({
   rigConfig,
   mirror,
   roomM,
+  lmOpts,
 }: RoomViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mirrorRef = useRef(mirror);
@@ -128,6 +141,8 @@ export function RoomViewport({
   roomMRef.current = roomM;
   const rigRef = useRef(rigConfig);
   rigRef.current = rigConfig;
+  const lmOptsRef = useRef(lmOpts);
+  lmOptsRef.current = lmOpts;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -267,7 +282,33 @@ export function RoomViewport({
     const mEyeL = mkEyeSph(matEye, 4); const mEyeR = mkEyeSph(matEye, 4);
     const mIrisL = mkEyeSph(matIris, 5); const mIrisR = mkEyeSph(matIris, 5);
 
-    const heldLm: (NormalizedLandmark | null)[] = new Array(33).fill(null);
+    // ── per-stream persistence (hold-last-good) + EMA smoothing ──
+    interface LmProc { held: NormalizedLandmark[] | null; sm: NormalizedLandmark[] | null; }
+    const poseProc: LmProc = { held: null, sm: null };
+    const faceProc: LmProc = { held: null, sm: null };
+    const handLProc: LmProc = { held: null, sm: null };
+    const handRProc: LmProc = { held: null, sm: null };
+    const procLm = (
+      st: LmProc, live: NormalizedLandmark[] | null,
+      persist: boolean, smoothOn: boolean, alpha: number,
+    ): NormalizedLandmark[] | null => {
+      if (live) st.held = live;
+      const target = live ?? (persist ? st.held : null);
+      if (!target) { st.sm = null; return null; }
+      if (!smoothOn) { st.sm = null; return target; }
+      if (!st.sm || st.sm.length !== target.length) {
+        st.sm = target.map((p) => ({ x: p.x, y: p.y, z: p.z, visibility: p.visibility ?? 1 }));
+      } else {
+        for (let i = 0; i < target.length; i++) {
+          const t = target[i], s = st.sm[i];
+          s.x += (t.x - s.x) * alpha;
+          s.y += (t.y - s.y) * alpha;
+          s.z += (t.z - s.z) * alpha;
+          (s as { visibility: number }).visibility = t.visibility ?? 1;
+        }
+      }
+      return st.sm;
+    };
 
     let disposed = false;
 
@@ -280,7 +321,9 @@ export function RoomViewport({
       cube.position.y = roomMv / 2;
       controls.update();
 
-      const pw = debugLandmarksRef.current.poseWorld;
+      const o = lmOptsRef.current;
+      const alpha = o.smoothing ? Math.max(0.04, 1 - o.smoothAmount) : 1;
+      const pw = procLm(poseProc, debugLandmarksRef.current.poseWorld, o.persistPose, o.smoothing, alpha);
       const poseImg = debugLandmarksRef.current.pose;
       const rig = rigRef.current;
       const mx = mirrorRef.current ? -1 : 1;
@@ -290,8 +333,8 @@ export function RoomViewport({
 
       const getLm = (i: number): NormalizedLandmark | null => {
         const lm = pw?.[i];
-        if (lm && (lm.visibility ?? 1) >= MIN_VIS) { heldLm[i] = lm; return lm; }
-        return heldLm[i] ?? null;
+        if (lm && (lm.visibility ?? 1) >= MIN_VIS) return lm;
+        return o.persistPose ? (lm ?? null) : null;
       };
       const RV = (i: number): THREE.Vector3 | null => {
         const lm = getLm(i);
@@ -355,7 +398,7 @@ export function RoomViewport({
       // ── filled face surface (+ contour overlay): all 468 vertices written to
       //    the shared buffer; sized to the FIXED head × the tunable faceScale,
       //    offset from the head centre by the tunable face offsets.
-      const face = debugLandmarksRef.current.face;
+      const face = procLm(faceProc, debugLandmarksRef.current.face, o.persistFace, o.smoothing, alpha);
       if (face && face.length >= 468) {
         let cx = 0, cy = 0, cz = 0, minY = 1, maxY = 0;
         for (let i = 0; i < 468; i++) {
@@ -391,8 +434,8 @@ export function RoomViewport({
         wr.clone().addScaledVector(_v2.subVectors(wr, el).normalize(), 0.09);
       const handLenM = len(rig.handLengthCm);
       const handR = len(rig.handRcm);
-      const lHand = debugLandmarksRef.current.leftHand;
-      const rHand = debugLandmarksRef.current.rightHand;
+      const lHand = procLm(handLProc, debugLandmarksRef.current.leftHand, o.persistHands, o.smoothing, alpha);
+      const rHand = procLm(handRProc, debugLandmarksRef.current.rightHand, o.persistHands, o.smoothing, alpha);
       const wristSide = (hd: NormalizedLandmark[] | null): "L" | "R" | null => {
         if (!hd || !hd[0] || !poseImg) return null;
         const hw = hd[0];
