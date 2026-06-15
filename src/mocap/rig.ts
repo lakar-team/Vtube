@@ -33,6 +33,13 @@ export interface RigConfig {
   footRcm: number;
   jointRcm: number;
   handRcm: number;
+  // ── face mesh fit on the head (tunable) ──
+  /** Face-mesh size multiplier relative to the head (1 = head-fit). */
+  faceScale: number;
+  /** Face-mesh offset from the head centre (cm): X right, Y up, Z toward viewer. */
+  faceOffXcm: number;
+  faceOffYcm: number;
+  faceOffZcm: number;
   /** Entered standing height at capture (cm). */
   heightCm: number;
   /** Epoch ms of the capture, or null for the default (uncaptured) rig. */
@@ -64,6 +71,10 @@ export const DEFAULT_RIG: RigConfig = {
   footRcm: 3,
   jointRcm: 4,
   handRcm: 6.5,
+  faceScale: 1,
+  faceOffXcm: 0,
+  faceOffYcm: 0,
+  faceOffZcm: 0,
   heightCm: 170,
   capturedAt: null,
 };

@@ -5,7 +5,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import type { DebugLandmarks } from "../mocap/types";
 import type { RigConfig } from "../mocap/rig";
-import { FACE_CONTOURS } from "./faceMeshData";
+import { FACE_CONTOURS, FACE_TRIANGLES } from "./faceMeshData";
 
 /**
  * VIEWPORT: 3D Room View (right pane) — Performance View.
@@ -190,17 +190,36 @@ export function RoomViewport({
     ];
     for (const m of meshes) { m.visible = false; figure.add(m); }
 
-    const matFace = new THREE.LineBasicMaterial({
-      color: 0x66ddff, transparent: true, opacity: 0.95, depthTest: false,
+    // Face: one shared 468-vertex position buffer feeds a FILLED triangle
+    // surface (indexed by FACE_TRIANGLES) plus a contour overlay (indexed by
+    // FACE_CONTOURS) for feature definition. depthTest:false so the face always
+    // reads on the front of the head sphere.
+    const faceVerts = new Float32Array(468 * 3);
+    const facePosAttr = new THREE.BufferAttribute(faceVerts, 3);
+
+    const faceFillGeom = new THREE.BufferGeometry();
+    faceFillGeom.setAttribute("position", facePosAttr);
+    faceFillGeom.setIndex(new THREE.BufferAttribute(FACE_TRIANGLES, 1));
+    const matFaceFill = new THREE.MeshLambertMaterial({
+      color: 0xd9a079, side: THREE.DoubleSide, depthTest: false, depthWrite: false,
     });
-    const faceGeom = new THREE.BufferGeometry();
-    const facePos = new Float32Array(FACE_CONTOURS.length * 3);
-    faceGeom.setAttribute("position", new THREE.BufferAttribute(facePos, 3));
-    const faceMesh = new THREE.LineSegments(faceGeom, matFace);
-    faceMesh.frustumCulled = false;
-    faceMesh.renderOrder = 2;
-    faceMesh.visible = false;
-    figure.add(faceMesh);
+    const faceFill = new THREE.Mesh(faceFillGeom, matFaceFill);
+    faceFill.frustumCulled = false;
+    faceFill.renderOrder = 2;
+    faceFill.visible = false;
+    figure.add(faceFill);
+
+    const faceLineGeom = new THREE.BufferGeometry();
+    faceLineGeom.setAttribute("position", facePosAttr);
+    faceLineGeom.setIndex(new THREE.BufferAttribute(FACE_CONTOURS, 1));
+    const matFaceLine = new THREE.LineBasicMaterial({
+      color: 0x33586b, transparent: true, opacity: 0.7, depthTest: false,
+    });
+    const faceLine = new THREE.LineSegments(faceLineGeom, matFaceLine);
+    faceLine.frustumCulled = false;
+    faceLine.renderOrder = 3;
+    faceLine.visible = false;
+    figure.add(faceLine);
 
     const matBoneL = new THREE.LineBasicMaterial({ color: 0x88bbff });
     const matBoneR = new THREE.LineBasicMaterial({ color: 0xff99aa });
@@ -304,7 +323,9 @@ export function RoomViewport({
       placeSph(mJKnL, knL, jR);   placeSph(mJKnR, knR, jR);
       placeSph(mJAnL, anL, jR);   placeSph(mJAnR, anR, jR);
 
-      // ── face mesh: sized to the FIXED head, centred + anchored at headC.
+      // ── filled face surface (+ contour overlay): all 468 vertices written to
+      //    the shared buffer; sized to the FIXED head × the tunable faceScale,
+      //    offset from the head centre by the tunable face offsets.
       const face = debugLandmarksRef.current.face;
       if (face && face.length >= 468) {
         let cx = 0, cy = 0, cz = 0, minY = 1, maxY = 0;
@@ -315,18 +336,25 @@ export function RoomViewport({
           if (p.y > maxY) maxY = p.y;
         }
         cx /= 468; cy /= 468; cz /= 468;
-        const fScale = (headR * 2 * FACE_FIT) / Math.max(maxY - minY, 1e-3);
-        for (let k = 0; k < FACE_CONTOURS.length; k++) {
-          const p = face[FACE_CONTOURS[k]];
-          facePos[k * 3]     = mx * (p.x - cx) * fScale;
-          facePos[k * 3 + 1] = -(p.y - cy) * fScale;
-          facePos[k * 3 + 2] = -(p.z - cz) * fScale;
+        const fScale = (headR * 2 * FACE_FIT * rig.faceScale) / Math.max(maxY - minY, 1e-3);
+        for (let i = 0; i < 468; i++) {
+          const p = face[i];
+          faceVerts[i * 3]     = mx * (p.x - cx) * fScale;
+          faceVerts[i * 3 + 1] = -(p.y - cy) * fScale;
+          faceVerts[i * 3 + 2] = -(p.z - cz) * fScale;
         }
-        faceGeom.attributes.position.needsUpdate = true;
-        faceMesh.position.copy(headC);
-        faceMesh.visible = true;
+        facePosAttr.needsUpdate = true;
+        faceFillGeom.computeVertexNormals();
+        const fx = headC.x + len(rig.faceOffXcm);
+        const fy = headC.y + len(rig.faceOffYcm);
+        const fz = headC.z + len(rig.faceOffZcm);
+        faceFill.position.set(fx, fy, fz);
+        faceLine.position.set(fx, fy, fz);
+        faceFill.visible = true;
+        faceLine.visible = true;
       } else {
-        faceMesh.visible = false;
+        faceFill.visible = false;
+        faceLine.visible = false;
       }
 
       // ── hands: fingers at the FK wrist, sized from the FIXED captured forearm.
@@ -411,11 +439,12 @@ export function RoomViewport({
       renderer.dispose();
       renderer.domElement.remove();
       matL.dispose(); matR.dispose(); matC.dispose();
-      matFace.dispose(); matBoneL.dispose(); matBoneR.dispose();
+      matFaceFill.dispose(); matFaceLine.dispose();
+      matBoneL.dispose(); matBoneR.dispose();
       grid.dispose();
       (cube.geometry as THREE.BufferGeometry).dispose();
       (cube.material as THREE.Material).dispose();
-      faceGeom.dispose();
+      faceFillGeom.dispose(); faceLineGeom.dispose();
       handLeft.bGeom.dispose(); handRight.bGeom.dispose();
       for (const m of meshes) m.geometry.dispose();
       for (const j of handLeft.joints) j.geometry.dispose();

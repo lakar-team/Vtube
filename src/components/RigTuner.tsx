@@ -30,6 +30,13 @@ const HEAD: Row[] = [
   ["head ⌀", "headDiameterCm", 8, 40, 0.5],
 ];
 
+const FACE: Row[] = [
+  ["face scale", "faceScale", 0.3, 2.5, 0.05],
+  ["face X", "faceOffXcm", -15, 15, 0.5],
+  ["face Y", "faceOffYcm", -15, 15, 0.5],
+  ["face Z", "faceOffZcm", -15, 15, 0.5],
+];
+
 const RADII: Row[] = [
   ["neck R", "neckRcm", 0.5, 15, 0.1],
   ["torso R", "torsoRcm", 1, 20, 0.1],
@@ -67,6 +74,8 @@ export function RigTuner({ rig, onChange, onReset }: RigTunerProps) {
       {LENGTHS.map(slider)}
       <div className="tuner-group">head (cm)</div>
       {HEAD.map(slider)}
+      <div className="tuner-group">face mesh</div>
+      {FACE.map(slider)}
       <div className="tuner-group">thickness (cm radius)</div>
       {RADII.map(slider)}
       <button type="button" className="btn" onClick={onReset} style={{ marginTop: 10 }}>
