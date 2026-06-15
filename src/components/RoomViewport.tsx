@@ -4,36 +4,31 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import type { DebugLandmarks } from "../mocap/types";
-import type { BodyCalibration } from "../mocap/bodyCalibration";
+import type { RigConfig } from "../mocap/rig";
 import { FACE_CONTOURS } from "./faceMeshData";
 
 /**
- * VIEWPORT: 3D Room View (right pane) — metric implementation.
+ * VIEWPORT: 3D Room View (right pane) — Performance View.
  *
- * Renders the mocap subject as a real-scale mannequin standing inside a room of
- * real dimensions, under a PERSPECTIVE camera. Positions come from MediaPipe
- * `worldLandmarks` (meters, hip-origin) scaled by the height calibration — so
- * proportions are consistent regardless of distance from the camera.
+ * Renders the mocap subject as a real-scale mannequin in a metric room, driven
+ * as a FIXED-PROPORTION rig: bone LENGTHS come from the captured RigConfig
+ * (constant), and each frame mocap supplies only the bone DIRECTIONS (from the
+ * poseWorld landmark deltas — direction is scale-invariant, so the subject's
+ * distance from the camera no longer changes any size). Joint positions are
+ * rebuilt by forward kinematics from a hip root anchored at the captured hip
+ * height. Head, face mesh, and hands are likewise sized from RigConfig, not from
+ * live per-frame calibration.
  *
- * COORDINATE CONVERSION (worldLandmarks → room):
- *   worldLandmarks are meters with y DOWN, origin at the hip midpoint. The
- *   mannequin is built in a Group anchored at the calibrated hip height; each
- *   landmark maps to group-local coords: local = ( mirror*x, -y, -z ) * scale
- *   (y flipped to y-up; z flipped so "toward camera" faces the viewer).
- *
- * FACE + HANDS (Phase 4): the FaceLandmarker mesh and HandLandmarker fingers are
- * normalized image-space (not metric world), so they're placed via the fallback
- * approach — re-centred on their own anchor (head centre / wrist), scaled to a
- * real size from calibration, and converted with the same axis convention. This
- * sidesteps aligning the face camera-frame with the pose hip-frame.
+ * COORDINATE CONVENTION: poseWorld is meters, y-DOWN, hip-origin. We work in
+ * "room-space direction" units = (mirror*x, -y, -z) (y-up; z toward viewer),
+ * normalized for directions; lengths come from RigConfig (cm → m).
  */
 
 const MIN_VIS = 0.5;
-const HIP_HEIGHT_RATIO = 0.53; // hip height / stature, adult mean
-const DEFAULT_HEAD_DIAMETER_M = 0.18;
-const FACE_FIT = 0.85;         // face-mesh height as a fraction of the head-sphere diameter
+const ROOM_DEFAULT = 2.5;
+const FACE_FIT = 0.85; // face-mesh height as a fraction of the head-sphere diameter
 
-// Metric segment radii (meters) — real-world-ish limb thicknesses.
+// Metric segment radii (meters) — real-world-ish limb thicknesses (tunable later).
 const R_NECK = 0.035;
 const R_TORSO = 0.090;
 const R_UARM = 0.045;
@@ -42,7 +37,7 @@ const R_ULEG = 0.070;
 const R_LLEG = 0.050;
 const R_FOOT = 0.030;
 const R_JNT = 0.040;
-const R_HAND = 0.065;   // "fist" fallback marker when fingers aren't detected
+const R_HAND = 0.065;
 const R_FINGER_JNT = 0.009;
 
 // Pose landmark indices.
@@ -51,14 +46,13 @@ const SH_L = 11, SH_R = 12, EL_L = 13, EL_R = 14, WR_L = 15, WR_R = 16;
 const HIP_L = 23, HIP_R = 24, KN_L = 25, KN_R = 26, AN_L = 27, AN_R = 28;
 const TOE_L = 31, TOE_R = 32;
 
-// Hand bone connections (21-point MediaPipe hand topology).
 const HAND_BONES: ReadonlyArray<readonly [number, number]> = [
-  [0, 1], [1, 2], [2, 3], [3, 4],       // thumb
-  [0, 5], [5, 6], [6, 7], [7, 8],       // index
-  [5, 9], [9, 10], [10, 11], [11, 12],  // middle
-  [9, 13], [13, 14], [14, 15], [15, 16],// ring
-  [13, 17], [17, 18], [18, 19], [19, 20],// little
-  [0, 17],                              // palm edge
+  [0, 1], [1, 2], [2, 3], [3, 4],
+  [0, 5], [5, 6], [6, 7], [7, 8],
+  [5, 9], [9, 10], [10, 11], [11, 12],
+  [9, 13], [13, 14], [14, 15], [15, 16],
+  [13, 17], [17, 18], [18, 19], [19, 20],
+  [0, 17],
 ];
 
 // ─── shared temporaries ───────────────────────────────────────────────────
@@ -101,28 +95,26 @@ interface HandRig {
 
 export interface RoomViewportProps {
   debugLandmarksRef: MutableRefObject<DebugLandmarks>;
-  calibrationRef: MutableRefObject<BodyCalibration | null>;
+  /** Captured (or default) fixed body proportions — drives the whole rig. */
+  rigConfig: RigConfig;
   mirror: boolean;
-  /** Real standing height (cm) — anchors the mannequin's hip height. */
-  heightCm: number;
   /** Room cube side length (meters). */
   roomM: number;
 }
 
 export function RoomViewport({
   debugLandmarksRef,
-  calibrationRef,
+  rigConfig,
   mirror,
-  heightCm,
   roomM,
 }: RoomViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mirrorRef = useRef(mirror);
   mirrorRef.current = mirror;
-  const heightCmRef = useRef(heightCm);
-  heightCmRef.current = heightCm;
   const roomMRef = useRef(roomM);
   roomMRef.current = roomM;
+  const rigRef = useRef(rigConfig);
+  rigRef.current = rigConfig;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -139,11 +131,10 @@ export function RoomViewport({
     const scene = new THREE.Scene();
 
     const camera = new THREE.PerspectiveCamera(45, w0 / h0, 0.05, 500);
-    const r0 = roomMRef.current;
+    const r0 = roomMRef.current || ROOM_DEFAULT;
     camera.position.set(r0 * 0.85, 1.55, r0 * 1.45);
     camera.lookAt(0, 1.0, 0);
 
-    // Orbit/zoom/pan to inspect the room (replaces fixed camera presets).
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.target.set(0, 1.0, 0);
     controls.enableDamping = true;
@@ -157,8 +148,6 @@ export function RoomViewport({
     scene.add(fill);
     scene.add(new THREE.AmbientLight(0xffffff, 0.5));
 
-    // ── room: floor grid + wireframe cube edges, built unit-sized and scaled
-    //    to the current room dimension each frame (so the setting is live).
     const grid = new THREE.GridHelper(1, 10, 0x556699, 0x2a2a40);
     scene.add(grid);
     const cube = new THREE.LineSegments(
@@ -167,7 +156,6 @@ export function RoomViewport({
     );
     scene.add(cube);
 
-    // ── materials (same colour code as the skeleton view)
     const matL = new THREE.MeshLambertMaterial({ color: 0x4477cc }); // blue = left
     const matR = new THREE.MeshLambertMaterial({ color: 0xcc3344 }); // red  = right
     const matC = new THREE.MeshLambertMaterial({ color: 0xd4b080 }); // tan  = centre
@@ -175,7 +163,7 @@ export function RoomViewport({
     const figure = new THREE.Group();
     scene.add(figure);
 
-    const mHead  = makeSph(1, matC); // unit-radius sphere; scaled to head radius each frame
+    const mHead  = makeSph(1, matC); // unit-radius; scaled to head radius each frame
     const mNeck  = makeCyl(R_NECK, matC);
     const mTorso = makeCyl(R_TORSO, matC);
 
@@ -203,7 +191,7 @@ export function RoomViewport({
     ];
     for (const m of meshes) { m.visible = false; figure.add(m); }
 
-    // ── face contour mesh on the head (depthTest:false → always reads on top)
+    // face contour mesh (sized to the head, depthTest:false → reads on top)
     const matFace = new THREE.LineBasicMaterial({
       color: 0x66ddff, transparent: true, opacity: 0.95, depthTest: false,
     });
@@ -216,7 +204,6 @@ export function RoomViewport({
     faceMesh.visible = false;
     figure.add(faceMesh);
 
-    // ── per-hand finger rigs (21 joints + bone lines), anchored at the wrist
     const matBoneL = new THREE.LineBasicMaterial({ color: 0x88bbff });
     const matBoneR = new THREE.LineBasicMaterial({ color: 0xff99aa });
     const makeHand = (matBone: THREE.Material, matJoint: THREE.Material): HandRig => {
@@ -242,67 +229,70 @@ export function RoomViewport({
     renderer.setAnimationLoop(() => {
       if (disposed) return;
 
-      const roomM = roomMRef.current;
-      grid.scale.set(roomM, 1, roomM);
-      cube.scale.setScalar(roomM);
-      cube.position.y = roomM / 2;
+      const roomMv = roomMRef.current || ROOM_DEFAULT;
+      grid.scale.set(roomMv, 1, roomMv);
+      cube.scale.setScalar(roomMv);
+      cube.position.y = roomMv / 2;
       controls.update();
 
       const pw = debugLandmarksRef.current.poseWorld;
-      const poseImg = debugLandmarksRef.current.pose; // normalized image landmarks (for face/hand scale + wrist matching)
-      const cal = calibrationRef.current;
-      const scale = cal?.metersPerUnit ?? 1;
+      const poseImg = debugLandmarksRef.current.pose;
+      const rig = rigRef.current;
       const mx = mirrorRef.current ? -1 : 1;
+      const len = (cm: number) => cm / 100; // cm → meters
 
-      const statureM = heightCmRef.current / 100;
-      figure.position.set(0, HIP_HEIGHT_RATIO * statureM, 0);
+      // Anchor the hip root at the captured hip height above the floor.
+      figure.position.set(0, len(rig.hipHeightCm), 0);
 
+      // hold-last-good landmark; raw room-space vector for DIRECTIONS only.
       const getLm = (i: number): NormalizedLandmark | null => {
         const lm = pw?.[i];
         if (lm && (lm.visibility ?? 1) >= MIN_VIS) { heldLm[i] = lm; return lm; }
         return heldLm[i] ?? null;
       };
-      const local = (p: { x: number; y: number; z: number }): THREE.Vector3 =>
-        new THREE.Vector3(mx * p.x * scale, -p.y * scale, -p.z * scale);
-      const W = (i: number): THREE.Vector3 | null => {
+      const RV = (i: number): THREE.Vector3 | null => {
         const lm = getLm(i);
-        return lm ? local(lm) : null;
+        return lm ? new THREE.Vector3(mx * lm.x, -lm.y, -lm.z) : null;
       };
-      const M = (i: number, j: number): THREE.Vector3 | null => {
+      const RVm = (i: number, j: number): THREE.Vector3 | null => {
         const a = getLm(i), b = getLm(j);
         if (!a || !b) return null;
-        return local({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 });
+        return new THREE.Vector3(mx * (a.x + b.x) / 2, -(a.y + b.y) / 2, -(a.z + b.z) / 2);
       };
+      const dirOf = (a: THREE.Vector3 | null, b: THREE.Vector3 | null): THREE.Vector3 | null =>
+        a && b ? b.clone().sub(a).normalize() : null;
+      const ext = (from: THREE.Vector3 | null, d: THREE.Vector3 | null, cm: number): THREE.Vector3 | null =>
+        from && d ? from.clone().addScaledVector(d, len(cm)) : null;
 
-      const midSh = M(SH_L, SH_R);
-      const midHip = M(HIP_L, HIP_R);
+      // ── forward-kinematics skeleton: fixed lengths, live directions ──
+      const hipMid = new THREE.Vector3(0, 0, 0);          // root (group is at hip height)
+      const shMid = ext(hipMid, dirOf(RVm(HIP_L, HIP_R), RVm(SH_L, SH_R)), rig.torsoCm);
+      const headC = ext(shMid, dirOf(RVm(SH_L, SH_R), RVm(EAR_L, EAR_R)), rig.neckCm)
+        ?? ext(shMid, dirOf(RVm(SH_L, SH_R), RV(NOSE)), rig.neckCm);
 
-      const earL = W(EAR_L), earR = W(EAR_R), nose = W(NOSE);
-      const headCenter =
-        earL && earR ? earL.clone().add(earR).multiplyScalar(0.5)
-        : nose ? nose
-        : midSh ? midSh.clone().add(new THREE.Vector3(0, 0.22, 0))
-        : null;
+      const shAxis = dirOf(RV(SH_L), RV(SH_R));
+      const hipAxis = dirOf(RV(HIP_L), RV(HIP_R));
+      const shL = shMid && shAxis ? shMid.clone().addScaledVector(shAxis, -len(rig.shoulderWidthCm) / 2) : null;
+      const shR = shMid && shAxis ? shMid.clone().addScaledVector(shAxis,  len(rig.shoulderWidthCm) / 2) : null;
+      const hipL = hipAxis ? hipMid.clone().addScaledVector(hipAxis, -len(rig.hipWidthCm) / 2) : null;
+      const hipR = hipAxis ? hipMid.clone().addScaledVector(hipAxis,  len(rig.hipWidthCm) / 2) : null;
 
-      const shL = W(SH_L), shR = W(SH_R);
-      const elL = W(EL_L), elR = W(EL_R);
-      const wrL = W(WR_L), wrR = W(WR_R);
-      const hipL = W(HIP_L), hipR = W(HIP_R);
-      const knL = W(KN_L), knR = W(KN_R);
-      const anL = W(AN_L), anR = W(AN_R);
-      const toeL = W(TOE_L), toeR = W(TOE_R);
+      const elL = ext(shL, dirOf(RV(SH_L), RV(EL_L)), rig.upperArmCm);
+      const elR = ext(shR, dirOf(RV(SH_R), RV(EL_R)), rig.upperArmCm);
+      const wrL = ext(elL, dirOf(RV(EL_L), RV(WR_L)), rig.lowerArmCm);
+      const wrR = ext(elR, dirOf(RV(EL_R), RV(WR_R)), rig.lowerArmCm);
+      const knL = ext(hipL, dirOf(RV(HIP_L), RV(KN_L)), rig.upperLegCm);
+      const knR = ext(hipR, dirOf(RV(HIP_R), RV(KN_R)), rig.upperLegCm);
+      const anL = ext(knL, dirOf(RV(KN_L), RV(AN_L)), rig.lowerLegCm);
+      const anR = ext(knR, dirOf(RV(KN_R), RV(AN_R)), rig.lowerLegCm);
+      const toeL = ext(anL, dirOf(RV(AN_L), RV(TOE_L)), rig.footCm);
+      const toeR = ext(anR, dirOf(RV(AN_R), RV(TOE_R)), rig.footCm);
 
-      const fist = (wr: THREE.Vector3 | null, el: THREE.Vector3 | null): THREE.Vector3 | null => {
-        if (!wr) return null;
-        if (!el) return wr;
-        return wr.clone().addScaledVector(_v2.subVectors(wr, el).normalize(), 0.09);
-      };
-
-      const headDiamM = cal?.headDiameterCm ? cal.headDiameterCm / 100 : DEFAULT_HEAD_DIAMETER_M;
+      const headDiamM = len(rig.headDiameterCm);
       const headR = Math.max(headDiamM * 0.65, 0.07);
-      placeSph(mHead, headCenter, headR);
-      placeCyl(mNeck, headCenter, midSh);
-      placeCyl(mTorso, midSh, midHip);
+      placeSph(mHead, headC, headR);
+      placeCyl(mNeck, headC, shMid);
+      placeCyl(mTorso, shMid, hipMid);
 
       placeCyl(mUArmL, shL, elL);  placeCyl(mUArmR, shR, elR);
       placeCyl(mLArmL, elL, wrL);  placeCyl(mLArmR, elR, wrR);
@@ -317,15 +307,11 @@ export function RoomViewport({
       placeSph(mJKnL, knL);   placeSph(mJKnR, knR);
       placeSph(mJAnL, anL);   placeSph(mJAnR, anR);
 
-      // ── face mesh as a genuine 3D object SIZED TO THE HEAD. We scale by the
-      //    face mesh's OWN image height (forehead↔chin — yaw-invariant) up to a
-      //    fraction of the calibrated head-sphere diameter, so the mesh always
-      //    matches the head and is invariant to camera distance. (Earlier this
-      //    used the pose ear distance, but the full-body pose model places the
-      //    "ears" narrower than the precise face width, which over-scaled the
-      //    mesh.) x/y/z all kept (true 3D), centred + anchored at the head.
+      // ── face mesh: sized to the FIXED head (rig), centred + anchored at headC.
+      //    Its own image height (yaw-invariant) maps to the head-sphere diameter,
+      //    so it's constant size regardless of camera distance.
       const face = debugLandmarksRef.current.face;
-      if (face && face.length >= 468 && headCenter) {
+      if (face && face.length >= 468 && headC) {
         let cx = 0, cy = 0, cz = 0, minY = 1, maxY = 0;
         for (let i = 0; i < 468; i++) {
           const p = face[i];
@@ -342,52 +328,21 @@ export function RoomViewport({
           facePos[k * 3 + 2] = -(p.z - cz) * fScale;
         }
         faceGeom.attributes.position.needsUpdate = true;
-        faceMesh.position.copy(headCenter);
+        faceMesh.position.copy(headC);
         faceMesh.visible = true;
       } else {
         faceMesh.visible = false;
       }
 
-      // ── hands: assign each detected hand to the NEAREST pose wrist (in image
-      //    space, using debug.pose) so MediaPipe's left/right swap under mirror
-      //    can't mismatch them; then render a finger skeleton. A fist marker
-      //    shows only when no finger landmarks are present for that wrist.
+      // ── hands: fingers at the FK wrist, sized from the FIXED captured forearm.
+      const fist = (wr: THREE.Vector3 | null, el: THREE.Vector3 | null): THREE.Vector3 | null => {
+        if (!wr) return null;
+        if (!el) return wr;
+        return wr.clone().addScaledVector(_v2.subVectors(wr, el).normalize(), 0.09);
+      };
+      const realHandM = len(rig.lowerArmCm) * 0.75; // fixed hand length from capture
       const lHand = debugLandmarksRef.current.leftHand;
       const rHand = debugLandmarksRef.current.rightHand;
-      const updateHand = (
-        rig: HandRig,
-        lm: NormalizedLandmark[] | null,
-        wrist: THREE.Vector3 | null,
-      ): boolean => {
-        if (!lm || lm.length < 21 || !wrist) {
-          for (const j of rig.joints) j.visible = false;
-          rig.bones.visible = false;
-          return false;
-        }
-        const lm0 = lm[0], mid = lm[12];
-        const span = Math.hypot(mid.x - lm0.x, mid.y - lm0.y, mid.z - lm0.z);
-        const realHandM = (cal?.lowerArmCm ? cal.lowerArmCm / 100 : 0.25) * 0.75;
-        const s = realHandM / Math.max(span, 1e-3);
-        const hp = (i: number): THREE.Vector3 => {
-          const p = lm[i];
-          return _hp.set(
-            wrist.x + mx * (p.x - lm0.x) * s,
-            wrist.y - (p.y - lm0.y) * s,
-            wrist.z - (p.z - lm0.z) * s,
-          );
-        };
-        for (let i = 0; i < 21; i++) placeSph(rig.joints[i], hp(i));
-        for (let k = 0; k < HAND_BONES.length; k++) {
-          const [a, b] = HAND_BONES[k];
-          const pa = hp(a); const ax = pa.x, ay = pa.y, az = pa.z;
-          const pb = hp(b);
-          rig.bPos[k * 6]     = ax;   rig.bPos[k * 6 + 1] = ay;   rig.bPos[k * 6 + 2] = az;
-          rig.bPos[k * 6 + 3] = pb.x; rig.bPos[k * 6 + 4] = pb.y; rig.bPos[k * 6 + 5] = pb.z;
-        }
-        rig.bGeom.attributes.position.needsUpdate = true;
-        rig.bones.visible = true;
-        return true;
-      };
       const wristSide = (hd: NormalizedLandmark[] | null): "L" | "R" | null => {
         if (!hd || !hd[0] || !poseImg) return null;
         const hw = hd[0];
@@ -404,6 +359,39 @@ export function RoomViewport({
         if (side === "L") dataForL = hd;
         else if (side === "R") dataForR = hd;
       }
+      const updateHand = (
+        rig2: HandRig,
+        lm: NormalizedLandmark[] | null,
+        wrist: THREE.Vector3 | null,
+      ): boolean => {
+        if (!lm || lm.length < 21 || !wrist) {
+          for (const j of rig2.joints) j.visible = false;
+          rig2.bones.visible = false;
+          return false;
+        }
+        const lm0 = lm[0], mid = lm[12];
+        const span = Math.hypot(mid.x - lm0.x, mid.y - lm0.y, mid.z - lm0.z);
+        const s = realHandM / Math.max(span, 1e-3);
+        const hp = (i: number): THREE.Vector3 => {
+          const p = lm[i];
+          return _hp.set(
+            wrist.x + mx * (p.x - lm0.x) * s,
+            wrist.y - (p.y - lm0.y) * s,
+            wrist.z - (p.z - lm0.z) * s,
+          );
+        };
+        for (let i = 0; i < 21; i++) placeSph(rig2.joints[i], hp(i));
+        for (let k = 0; k < HAND_BONES.length; k++) {
+          const [a, b] = HAND_BONES[k];
+          const pa = hp(a); const ax = pa.x, ay = pa.y, az = pa.z;
+          const pb = hp(b);
+          rig2.bPos[k * 6]     = ax;   rig2.bPos[k * 6 + 1] = ay;   rig2.bPos[k * 6 + 2] = az;
+          rig2.bPos[k * 6 + 3] = pb.x; rig2.bPos[k * 6 + 4] = pb.y; rig2.bPos[k * 6 + 5] = pb.z;
+        }
+        rig2.bGeom.attributes.position.needsUpdate = true;
+        rig2.bones.visible = true;
+        return true;
+      };
       const lFingers = updateHand(handLeft, dataForL, wrL);
       const rFingers = updateHand(handRight, dataForR, wrR);
       placeSph(mHandL, lFingers ? null : fist(wrL, elL));
@@ -446,7 +434,7 @@ export function RoomViewport({
   return (
     <div ref={containerRef} className="avatar-viewport">
       <div className="viewport-badge">
-        3D room view · metric mannequin ({roomM}m room · drag to orbit) ·{" "}
+        3D room view · fixed-proportion rig ({roomM}m room · drag to orbit) ·{" "}
         <span style={{ color: "#4477cc" }}>blue=left</span> ·{" "}
         <span style={{ color: "#cc3344" }}>red=right</span> ·{" "}
         <span style={{ color: "#66ddff" }}>face</span>

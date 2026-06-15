@@ -232,9 +232,8 @@ export default function App() {
           <section className="pane">
             <RoomViewport
               debugLandmarksRef={mocap.debugLandmarksRef}
-              calibrationRef={mocap.calibrationRef}
+              rigConfig={rigConfig}
               mirror={mirror}
-              heightCm={heightCm}
               roomM={roomM}
             />
           </section>
