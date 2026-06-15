@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { WebcamView } from "./components/WebcamView";
 import { AvatarViewport, type ViewMode } from "./components/AvatarViewport";
 import { FaceMeshDebugView } from "./components/FaceMeshDebugView";
@@ -6,6 +6,7 @@ import { RoomViewport } from "./components/RoomViewport";
 import { DebugHUD } from "./components/DebugHUD";
 import { useWebcam } from "./hooks/useWebcam";
 import { useMocap } from "./mocap/useMocap";
+import { captureRigConfig, loadRigConfig, saveRigConfig, type RigConfig } from "./mocap/rig";
 import type { ExpressionMapping } from "./vrm/expressionMap";
 
 type DisplayMode = "avatar" | "both" | "room";
@@ -54,6 +55,9 @@ export default function App() {
   const [displayMode, setDisplayMode] = useState<DisplayMode>(loadDisplayMode);
   const [heightCm, setHeightCm] = useState<number>(loadHeightCm);
   const [roomM, setRoomM] = useState<number>(loadRoomM);
+  const [rigConfig, setRigConfig] = useState<RigConfig>(loadRigConfig);
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const captureTimerRef = useRef<number | null>(null);
   const [expressionMap, setExpressionMap] = useState<ExpressionMapping | null>(null);
 
   const webcam = useWebcam(videoRef);
@@ -78,6 +82,33 @@ export default function App() {
     setRoomM(v);
     try { localStorage.setItem(ROOM_KEY, String(v)); } catch { /* privacy mode */ }
   };
+
+  // ── one-time scale capture: 5s countdown, then snapshot proportions once.
+  const startCapture = () => {
+    if (countdown !== null) return;
+    let n = 5;
+    setCountdown(n);
+    captureTimerRef.current = window.setInterval(() => {
+      n -= 1;
+      if (n > 0) { setCountdown(n); return; }
+      if (captureTimerRef.current !== null) window.clearInterval(captureTimerRef.current);
+      captureTimerRef.current = null;
+      setCountdown(null);
+      const pw = mocap.debugLandmarksRef.current.poseWorld;
+      const mpu = mocap.calibrationRef.current?.metersPerUnit ?? 1;
+      const cfg = captureRigConfig(pw, mpu, heightCm, Date.now());
+      if (cfg) {
+        setRigConfig(cfg);
+        saveRigConfig(cfg);
+      } else {
+        console.warn("[scale capture] failed — stand fully in frame and retry");
+      }
+    }, 1000);
+  };
+
+  useEffect(() => () => {
+    if (captureTimerRef.current !== null) window.clearInterval(captureTimerRef.current);
+  }, []);
 
   return (
     <div className="app">
@@ -156,6 +187,15 @@ export default function App() {
               <option value="both">both (avatar + room)</option>
             </select>
           </label>
+          <button
+            type="button"
+            className="capture-btn"
+            onClick={startCapture}
+            disabled={countdown !== null}
+            title="Step back so your whole body is in frame, then your proportions are captured once and fixed for the 3D mannequin."
+          >
+            {countdown !== null ? `capturing… ${countdown}` : "capture scale"}
+          </button>
         </div>
       </header>
 
@@ -207,9 +247,17 @@ export default function App() {
           rawFrameRef={mocap.rawFrameRef}
           frameRef={mocap.frameRef}
           calibrationRef={mocap.calibrationRef}
+          rigConfig={rigConfig}
           expressionMap={expressionMap}
         />
       </footer>
+
+      {countdown !== null && (
+        <div className="capture-countdown" aria-hidden="true">
+          <div className="capture-countdown-num">{countdown}</div>
+          <div className="capture-countdown-label">Step into frame — capturing scale…</div>
+        </div>
+      )}
     </div>
   );
 }

@@ -63,7 +63,7 @@ function mid(a: P, b: P): P {
 }
 
 /** Stature in world units from eye height, when eyes + ankles are visible. */
-function estimateStatureUnits(pw: NormalizedLandmark[]): number | null {
+export function estimateStatureUnits(pw: NormalizedLandmark[]): number | null {
   const eyeL = pw[2], eyeR = pw[5], ankL = pw[27], ankR = pw[28];
   if (!vis(eyeL) || !vis(eyeR) || !vis(ankL) || !vis(ankR)) return null;
   const eyeHeight = d3(mid(eyeL, eyeR), mid(ankL, ankR));

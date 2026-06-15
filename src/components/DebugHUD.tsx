@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { MutableRefObject } from "react";
 import type { MocapFrame } from "../mocap/types";
 import type { BodyCalibration } from "../mocap/bodyCalibration";
+import type { RigConfig } from "../mocap/rig";
 import type { MocapState } from "../mocap/useMocap";
 import type { ExpressionMapping } from "../vrm/expressionMap";
 import { fmtFixed, radToDeg } from "../utils/math";
@@ -12,6 +13,8 @@ export interface DebugHUDProps {
   frameRef: MutableRefObject<MocapFrame | null>;
   /** Body-size calibration (metric scale + derived real-world sizes). */
   calibrationRef: MutableRefObject<BodyCalibration | null>;
+  /** Captured (or default) fixed body proportions for the 3D mannequin. */
+  rigConfig: RigConfig;
   /** Per-model blendshape support summary, once the VRM has loaded. */
   expressionMap?: ExpressionMapping | null;
 }
@@ -72,6 +75,7 @@ export function DebugHUD({
   rawFrameRef,
   frameRef,
   calibrationRef,
+  rigConfig,
   expressionMap,
 }: DebugHUDProps) {
   const [sample, setSample] = useState<HudSample | null>(null);
@@ -184,6 +188,21 @@ export function DebugHUD({
           <strong className="hud-cell-world">
             arm {cm(sample?.uArmCm)}/{cm(sample?.lArmCm)} · leg{" "}
             {cm(sample?.uLegCm)}/{cm(sample?.lLegCm)} · shoulders {cm(sample?.shoulderCm)}
+          </strong>
+        </div>
+        <div className="hud-row">
+          <span>rig (captured)</span>
+          <strong className={`hud-cell-world ${rigConfig.capturedAt ? "ok" : "bad"}`}>
+            {rigConfig.capturedAt
+              ? `head ${cm(rigConfig.headDiameterCm)} · torso ${cm(rigConfig.torsoCm)} · hipH ${cm(rigConfig.hipHeightCm)}cm`
+              : "default rig — press “capture scale”"}
+          </strong>
+        </div>
+        <div className="hud-row">
+          <span>rig limbs (cm)</span>
+          <strong className="hud-cell-world">
+            arm {cm(rigConfig.upperArmCm)}/{cm(rigConfig.lowerArmCm)} · leg{" "}
+            {cm(rigConfig.upperLegCm)}/{cm(rigConfig.lowerLegCm)} · sh {cm(rigConfig.shoulderWidthCm)} · hip {cm(rigConfig.hipWidthCm)}
           </strong>
         </div>
       </div>
