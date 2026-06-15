@@ -31,6 +31,7 @@ import { FACE_CONTOURS } from "./faceMeshData";
 const MIN_VIS = 0.5;
 const HIP_HEIGHT_RATIO = 0.53; // hip height / stature, adult mean
 const DEFAULT_HEAD_DIAMETER_M = 0.18;
+const FACE_FIT = 0.85;         // face-mesh height as a fraction of the head-sphere diameter
 
 // Metric segment radii (meters) — real-world-ish limb thicknesses.
 const R_NECK = 0.035;
@@ -316,27 +317,29 @@ export function RoomViewport({
       placeSph(mJKnL, knL);   placeSph(mJKnR, knR);
       placeSph(mJAnL, anL);   placeSph(mJAnR, anR);
 
-      // ── face mesh as a genuine 3D object in room space (not a screen-relative
-      //    paste). The face landmarks are normalized image space; we convert
-      //    them to METERS using the metric ear distance from the pose
-      //    (worldLandmarks) divided by the image ear distance — so the mesh is
-      //    a real, calibration-scaled size that doesn't shrink/grow with the
-      //    subject's distance or head rotation. x/y/z are all kept (true 3D),
-      //    re-centred on the face centroid and anchored at the head centre.
+      // ── face mesh as a genuine 3D object SIZED TO THE HEAD. We scale by the
+      //    face mesh's OWN image height (forehead↔chin — yaw-invariant) up to a
+      //    fraction of the calibrated head-sphere diameter, so the mesh always
+      //    matches the head and is invariant to camera distance. (Earlier this
+      //    used the pose ear distance, but the full-body pose model places the
+      //    "ears" narrower than the precise face width, which over-scaled the
+      //    mesh.) x/y/z all kept (true 3D), centred + anchored at the head.
       const face = debugLandmarksRef.current.face;
-      const earImgL = poseImg?.[EAR_L], earImgR = poseImg?.[EAR_R];
-      const imgEar = earImgL && earImgR
-        ? Math.hypot(earImgL.x - earImgR.x, earImgL.y - earImgR.y) : 0;
-      if (face && face.length >= 468 && headCenter && earL && earR && imgEar > 1e-4) {
-        const mpu = earL.distanceTo(earR) / imgEar; // meters per image-unit at the head
-        let cx = 0, cy = 0, cz = 0;
-        for (let i = 0; i < 468; i++) { const p = face[i]; cx += p.x; cy += p.y; cz += p.z; }
+      if (face && face.length >= 468 && headCenter) {
+        let cx = 0, cy = 0, cz = 0, minY = 1, maxY = 0;
+        for (let i = 0; i < 468; i++) {
+          const p = face[i];
+          cx += p.x; cy += p.y; cz += p.z;
+          if (p.y < minY) minY = p.y;
+          if (p.y > maxY) maxY = p.y;
+        }
         cx /= 468; cy /= 468; cz /= 468;
+        const fScale = (headR * 2 * FACE_FIT) / Math.max(maxY - minY, 1e-3);
         for (let k = 0; k < FACE_CONTOURS.length; k++) {
           const p = face[FACE_CONTOURS[k]];
-          facePos[k * 3]     = mx * (p.x - cx) * mpu;
-          facePos[k * 3 + 1] = -(p.y - cy) * mpu;
-          facePos[k * 3 + 2] = -(p.z - cz) * mpu;
+          facePos[k * 3]     = mx * (p.x - cx) * fScale;
+          facePos[k * 3 + 1] = -(p.y - cy) * fScale;
+          facePos[k * 3 + 2] = -(p.z - cz) * fScale;
         }
         faceGeom.attributes.position.needsUpdate = true;
         faceMesh.position.copy(headCenter);
