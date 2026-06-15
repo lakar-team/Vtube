@@ -3,18 +3,19 @@ import { WebcamView } from "./components/WebcamView";
 import { AvatarViewport, type ViewMode } from "./components/AvatarViewport";
 import { FaceMeshDebugView } from "./components/FaceMeshDebugView";
 import { SkeletonViewport } from "./components/SkeletonViewport";
+import { RoomViewport } from "./components/RoomViewport";
 import { DebugHUD } from "./components/DebugHUD";
 import { useWebcam } from "./hooks/useWebcam";
 import { useMocap } from "./mocap/useMocap";
 import type { ExpressionMapping } from "./vrm/expressionMap";
 
-type DisplayMode = "avatar" | "skeleton" | "both";
+type DisplayMode = "avatar" | "skeleton" | "both" | "room";
 const DISPLAY_MODE_KEY = "vtube.displayMode";
 
 function loadDisplayMode(): DisplayMode {
   try {
     const v = localStorage.getItem(DISPLAY_MODE_KEY) as DisplayMode | null;
-    return v === "avatar" || v === "skeleton" || v === "both" ? v : "avatar";
+    return v === "avatar" || v === "skeleton" || v === "both" || v === "room" ? v : "avatar";
   } catch {
     return "avatar";
   }
@@ -126,6 +127,7 @@ export default function App() {
               <option value="avatar">avatar</option>
               <option value="skeleton">skeleton</option>
               <option value="both">both</option>
+              <option value="room">room (3D)</option>
             </select>
           </label>
         </div>
@@ -165,6 +167,17 @@ export default function App() {
             <SkeletonViewport
               debugLandmarksRef={mocap.debugLandmarksRef}
               mirror={mirror}
+            />
+          </section>
+        )}
+
+        {displayMode === "room" && (
+          <section className="pane">
+            <RoomViewport
+              debugLandmarksRef={mocap.debugLandmarksRef}
+              calibrationRef={mocap.calibrationRef}
+              mirror={mirror}
+              heightCm={heightCm}
             />
           </section>
         )}
