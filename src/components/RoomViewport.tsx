@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { MutableRefObject } from "react";
 import * as THREE from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import type { DebugLandmarks } from "../mocap/types";
 import type { BodyCalibration } from "../mocap/bodyCalibration";
@@ -29,7 +30,6 @@ import { FACE_CONTOURS } from "./faceMeshData";
 
 const MIN_VIS = 0.5;
 const HIP_HEIGHT_RATIO = 0.53; // hip height / stature, adult mean
-const ROOM_M = 2.5;            // room cube side (meters) — adjustable in Phase 5
 const DEFAULT_HEAD_DIAMETER_M = 0.18;
 
 // Metric segment radii (meters) — real-world-ish limb thicknesses.
@@ -104,6 +104,8 @@ export interface RoomViewportProps {
   mirror: boolean;
   /** Real standing height (cm) — anchors the mannequin's hip height. */
   heightCm: number;
+  /** Room cube side length (meters). */
+  roomM: number;
 }
 
 export function RoomViewport({
@@ -111,12 +113,15 @@ export function RoomViewport({
   calibrationRef,
   mirror,
   heightCm,
+  roomM,
 }: RoomViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mirrorRef = useRef(mirror);
   mirrorRef.current = mirror;
   const heightCmRef = useRef(heightCm);
   heightCmRef.current = heightCm;
+  const roomMRef = useRef(roomM);
+  roomMRef.current = roomM;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -132,9 +137,16 @@ export function RoomViewport({
 
     const scene = new THREE.Scene();
 
-    const camera = new THREE.PerspectiveCamera(45, w0 / h0, 0.05, 50);
-    camera.position.set(ROOM_M * 0.85, 1.55, ROOM_M * 1.45);
+    const camera = new THREE.PerspectiveCamera(45, w0 / h0, 0.05, 500);
+    const r0 = roomMRef.current;
+    camera.position.set(r0 * 0.85, 1.55, r0 * 1.45);
     camera.lookAt(0, 1.0, 0);
+
+    // Orbit/zoom/pan to inspect the room (replaces fixed camera presets).
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 1.0, 0);
+    controls.enableDamping = true;
+    controls.update();
 
     const key = new THREE.DirectionalLight(0xffffff, Math.PI * 0.9);
     key.position.set(1.5, 3, 2);
@@ -144,14 +156,14 @@ export function RoomViewport({
     scene.add(fill);
     scene.add(new THREE.AmbientLight(0xffffff, 0.5));
 
-    // ── room: floor grid + wireframe cube edges
-    const grid = new THREE.GridHelper(ROOM_M, 10, 0x556699, 0x2a2a40);
+    // ── room: floor grid + wireframe cube edges, built unit-sized and scaled
+    //    to the current room dimension each frame (so the setting is live).
+    const grid = new THREE.GridHelper(1, 10, 0x556699, 0x2a2a40);
     scene.add(grid);
     const cube = new THREE.LineSegments(
-      new THREE.EdgesGeometry(new THREE.BoxGeometry(ROOM_M, ROOM_M, ROOM_M)),
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)),
       new THREE.LineBasicMaterial({ color: 0x445577 }),
     );
-    cube.position.y = ROOM_M / 2;
     scene.add(cube);
 
     // ── materials (same colour code as the skeleton view)
@@ -228,6 +240,12 @@ export function RoomViewport({
 
     renderer.setAnimationLoop(() => {
       if (disposed) return;
+
+      const roomM = roomMRef.current;
+      grid.scale.set(roomM, 1, roomM);
+      cube.scale.setScalar(roomM);
+      cube.position.y = roomM / 2;
+      controls.update();
 
       const pw = debugLandmarksRef.current.poseWorld;
       const poseImg = debugLandmarksRef.current.pose; // normalized image landmarks (for face/hand scale + wrist matching)
@@ -403,6 +421,7 @@ export function RoomViewport({
 
     return () => {
       disposed = true;
+      controls.dispose();
       ro.disconnect();
       renderer.setAnimationLoop(null);
       renderer.dispose();
@@ -424,7 +443,7 @@ export function RoomViewport({
   return (
     <div ref={containerRef} className="avatar-viewport">
       <div className="viewport-badge">
-        3D room view · metric mannequin ({ROOM_M}m room) ·{" "}
+        3D room view · metric mannequin ({roomM}m room · drag to orbit) ·{" "}
         <span style={{ color: "#4477cc" }}>blue=left</span> ·{" "}
         <span style={{ color: "#cc3344" }}>red=right</span> ·{" "}
         <span style={{ color: "#66ddff" }}>face</span>

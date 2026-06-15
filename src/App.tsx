@@ -2,22 +2,21 @@ import { useRef, useState } from "react";
 import { WebcamView } from "./components/WebcamView";
 import { AvatarViewport, type ViewMode } from "./components/AvatarViewport";
 import { FaceMeshDebugView } from "./components/FaceMeshDebugView";
-import { SkeletonViewport } from "./components/SkeletonViewport";
 import { RoomViewport } from "./components/RoomViewport";
 import { DebugHUD } from "./components/DebugHUD";
 import { useWebcam } from "./hooks/useWebcam";
 import { useMocap } from "./mocap/useMocap";
 import type { ExpressionMapping } from "./vrm/expressionMap";
 
-type DisplayMode = "avatar" | "skeleton" | "both" | "room";
+type DisplayMode = "avatar" | "both" | "room";
 const DISPLAY_MODE_KEY = "vtube.displayMode";
 
 function loadDisplayMode(): DisplayMode {
   try {
     const v = localStorage.getItem(DISPLAY_MODE_KEY) as DisplayMode | null;
-    return v === "avatar" || v === "skeleton" || v === "both" || v === "room" ? v : "avatar";
+    return v === "avatar" || v === "both" || v === "room" ? v : "room";
   } catch {
-    return "avatar";
+    return "room";
   }
 }
 
@@ -33,6 +32,18 @@ function loadHeightCm(): number {
   }
 }
 
+const ROOM_KEY = "vtube.roomM";
+const DEFAULT_ROOM_M = 2.5;
+
+function loadRoomM(): number {
+  try {
+    const v = Number(localStorage.getItem(ROOM_KEY));
+    return Number.isFinite(v) && v >= 0.5 && v <= 50 ? v : DEFAULT_ROOM_M;
+  } catch {
+    return DEFAULT_ROOM_M;
+  }
+}
+
 export default function App() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
@@ -42,6 +53,7 @@ export default function App() {
   const viewMode: ViewMode = "bust";
   const [displayMode, setDisplayMode] = useState<DisplayMode>(loadDisplayMode);
   const [heightCm, setHeightCm] = useState<number>(loadHeightCm);
+  const [roomM, setRoomM] = useState<number>(loadRoomM);
   const [expressionMap, setExpressionMap] = useState<ExpressionMapping | null>(null);
 
   const webcam = useWebcam(videoRef);
@@ -60,6 +72,11 @@ export default function App() {
   const changeHeightCm = (v: number) => {
     setHeightCm(v);
     try { localStorage.setItem(HEIGHT_KEY, String(v)); } catch { /* privacy mode */ }
+  };
+
+  const changeRoomM = (v: number) => {
+    setRoomM(v);
+    try { localStorage.setItem(ROOM_KEY, String(v)); } catch { /* privacy mode */ }
   };
 
   return (
@@ -107,16 +124,26 @@ export default function App() {
             />
             cm
           </label>
+          <label className="toggle" title="3D Room View cube size (meters). Increase for large/'giant robot' scenes.">
+            room
+            <input
+              type="number"
+              min={0.5}
+              max={50}
+              step={0.5}
+              value={roomM}
+              onChange={(e) => changeRoomM(Number(e.target.value))}
+              style={{ width: "3.5em" }}
+            />
+            m
+          </label>
           <label
             className="toggle"
             title={
-              "Which view to show in the right pane:\n" +
+              "Which view to show in the right pane(s):\n" +
+              "• room — metric 3D mannequin in a scaled room (drag to orbit)\n" +
               "• avatar — VRM avatar driven by retargeted mocap\n" +
-              "• skeleton — raw MediaPipe landmark positions (no retargeting)\n" +
-              "• both — avatar + skeleton side by side for direct comparison\n\n" +
-              "If the skeleton moves correctly but the avatar doesn't, the issue is in\n" +
-              "the retargeting layer. If both look wrong, the issue is upstream in\n" +
-              "landmark capture or smoothing."
+              "• both — avatar + 3D room side by side for direct comparison"
             }
           >
             view
@@ -124,10 +151,9 @@ export default function App() {
               value={displayMode}
               onChange={(e) => changeDisplayMode(e.target.value as DisplayMode)}
             >
-              <option value="avatar">avatar</option>
-              <option value="skeleton">skeleton</option>
-              <option value="both">both</option>
               <option value="room">room (3D)</option>
+              <option value="avatar">avatar</option>
+              <option value="both">both (avatar + room)</option>
             </select>
           </label>
         </div>
@@ -162,22 +188,14 @@ export default function App() {
           </section>
         )}
 
-        {(displayMode === "skeleton" || displayMode === "both") && (
-          <section className="pane">
-            <SkeletonViewport
-              debugLandmarksRef={mocap.debugLandmarksRef}
-              mirror={mirror}
-            />
-          </section>
-        )}
-
-        {displayMode === "room" && (
+        {(displayMode === "room" || displayMode === "both") && (
           <section className="pane">
             <RoomViewport
               debugLandmarksRef={mocap.debugLandmarksRef}
               calibrationRef={mocap.calibrationRef}
               mirror={mirror}
               heightCm={heightCm}
+              roomM={roomM}
             />
           </section>
         )}

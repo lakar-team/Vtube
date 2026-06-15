@@ -10,7 +10,7 @@ import type { ExpressionMapping } from "./expressionMap";
  * Face-tracking application layer: mocap face data -> three-vrm humanoid.
  *
  * Only head/neck rotation, eye gaze, and expressions are driven. Body bones
- * remain in rest pose — the skeleton mannequin (SkeletonViewport) handles
+ * remain in rest pose — the 3D room mannequin (RoomViewport) handles
  * full-body mocap visualization.
  *
  * COORDINATE QUIRK (VRM 0.x vs 1.0):
