@@ -230,6 +230,7 @@ export function RoomViewport({
       if (disposed) return;
 
       const pw = debugLandmarksRef.current.poseWorld;
+      const poseImg = debugLandmarksRef.current.pose; // normalized image landmarks (for face/hand scale + wrist matching)
       const cal = calibrationRef.current;
       const scale = cal?.metersPerUnit ?? 1;
       const mx = mirrorRef.current ? -1 : 1;
@@ -297,24 +298,27 @@ export function RoomViewport({
       placeSph(mJKnL, knL);   placeSph(mJKnR, knR);
       placeSph(mJAnL, anL);   placeSph(mJAnR, anR);
 
-      // ── face contour mesh: re-centred on its own centroid, scaled to the
-      //    head width, placed at the head centre. Landmarks carry head rotation.
+      // ── face mesh as a genuine 3D object in room space (not a screen-relative
+      //    paste). The face landmarks are normalized image space; we convert
+      //    them to METERS using the metric ear distance from the pose
+      //    (worldLandmarks) divided by the image ear distance — so the mesh is
+      //    a real, calibration-scaled size that doesn't shrink/grow with the
+      //    subject's distance or head rotation. x/y/z are all kept (true 3D),
+      //    re-centred on the face centroid and anchored at the head centre.
       const face = debugLandmarksRef.current.face;
-      if (face && face.length >= 468 && headCenter) {
-        let cx = 0, cy = 0, cz = 0, minX = 1, maxX = 0;
-        for (let i = 0; i < 468; i++) {
-          const p = face[i];
-          cx += p.x; cy += p.y; cz += p.z;
-          if (p.x < minX) minX = p.x;
-          if (p.x > maxX) maxX = p.x;
-        }
+      const earImgL = poseImg?.[EAR_L], earImgR = poseImg?.[EAR_R];
+      const imgEar = earImgL && earImgR
+        ? Math.hypot(earImgL.x - earImgR.x, earImgL.y - earImgR.y) : 0;
+      if (face && face.length >= 468 && headCenter && earL && earR && imgEar > 1e-4) {
+        const mpu = earL.distanceTo(earR) / imgEar; // meters per image-unit at the head
+        let cx = 0, cy = 0, cz = 0;
+        for (let i = 0; i < 468; i++) { const p = face[i]; cx += p.x; cy += p.y; cz += p.z; }
         cx /= 468; cy /= 468; cz /= 468;
-        const fScale = headDiamM / Math.max(maxX - minX, 1e-3);
         for (let k = 0; k < FACE_CONTOURS.length; k++) {
           const p = face[FACE_CONTOURS[k]];
-          facePos[k * 3]     = mx * (p.x - cx) * fScale;
-          facePos[k * 3 + 1] = -(p.y - cy) * fScale;
-          facePos[k * 3 + 2] = -(p.z - cz) * fScale;
+          facePos[k * 3]     = mx * (p.x - cx) * mpu;
+          facePos[k * 3 + 1] = -(p.y - cy) * mpu;
+          facePos[k * 3 + 2] = -(p.z - cz) * mpu;
         }
         faceGeom.attributes.position.needsUpdate = true;
         faceMesh.position.copy(headCenter);
@@ -323,7 +327,10 @@ export function RoomViewport({
         faceMesh.visible = false;
       }
 
-      // ── hands: finger skeleton when detected, else a fist marker at the wrist
+      // ── hands: assign each detected hand to the NEAREST pose wrist (in image
+      //    space, using debug.pose) so MediaPipe's left/right swap under mirror
+      //    can't mismatch them; then render a finger skeleton. A fist marker
+      //    shows only when no finger landmarks are present for that wrist.
       const lHand = debugLandmarksRef.current.leftHand;
       const rHand = debugLandmarksRef.current.rightHand;
       const updateHand = (
@@ -360,8 +367,24 @@ export function RoomViewport({
         rig.bones.visible = true;
         return true;
       };
-      const lFingers = updateHand(handLeft, lHand, wrL);
-      const rFingers = updateHand(handRight, rHand, wrR);
+      const wristSide = (hd: NormalizedLandmark[] | null): "L" | "R" | null => {
+        if (!hd || !hd[0] || !poseImg) return null;
+        const hw = hd[0];
+        const pl = poseImg[WR_L], pr = poseImg[WR_R];
+        const dl = pl ? Math.hypot(hw.x - pl.x, hw.y - pl.y) : Infinity;
+        const dr = pr ? Math.hypot(hw.x - pr.x, hw.y - pr.y) : Infinity;
+        if (dl === Infinity && dr === Infinity) return null;
+        return dl <= dr ? "L" : "R";
+      };
+      let dataForL: NormalizedLandmark[] | null = null;
+      let dataForR: NormalizedLandmark[] | null = null;
+      for (const hd of [lHand, rHand]) {
+        const side = wristSide(hd);
+        if (side === "L") dataForL = hd;
+        else if (side === "R") dataForR = hd;
+      }
+      const lFingers = updateHand(handLeft, dataForL, wrL);
+      const rFingers = updateHand(handRight, dataForR, wrR);
       placeSph(mHandL, lFingers ? null : fist(wrL, elL));
       placeSph(mHandR, rFingers ? null : fist(wrR, elR));
 
