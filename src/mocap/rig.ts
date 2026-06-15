@@ -10,6 +10,7 @@ import { estimateStatureUnits } from "./bodyCalibration";
  * (forward kinematics) and add tuner / face-mesh fields.
  */
 export interface RigConfig {
+  // ── bone lengths (cm) ──
   neckCm: number;
   torsoCm: number;
   upperArmCm: number;
@@ -22,11 +23,24 @@ export interface RigConfig {
   headDiameterCm: number;
   /** Hip height above the floor (cm) — anchors the rig in the room. */
   hipHeightCm: number;
+  // ── limb thickness (cm radius) — tunable, defaults until edited ──
+  neckRcm: number;
+  torsoRcm: number;
+  upperArmRcm: number;
+  lowerArmRcm: number;
+  upperLegRcm: number;
+  lowerLegRcm: number;
+  footRcm: number;
+  jointRcm: number;
+  handRcm: number;
   /** Entered standing height at capture (cm). */
   heightCm: number;
   /** Epoch ms of the capture, or null for the default (uncaptured) rig. */
   capturedAt: number | null;
 }
+
+/** Numeric (tunable) RigConfig keys — everything except the capture timestamp. */
+export type RigNumKey = Exclude<keyof RigConfig, "capturedAt">;
 
 /** Rough adult proportions (~170cm) — used until the user captures their own. */
 export const DEFAULT_RIG: RigConfig = {
@@ -41,6 +55,15 @@ export const DEFAULT_RIG: RigConfig = {
   hipWidthCm: 32,
   headDiameterCm: 18,
   hipHeightCm: 90,
+  neckRcm: 3.5,
+  torsoRcm: 9,
+  upperArmRcm: 4.5,
+  lowerArmRcm: 3.3,
+  upperLegRcm: 7,
+  lowerLegRcm: 5,
+  footRcm: 3,
+  jointRcm: 4,
+  handRcm: 6.5,
   heightCm: 170,
   capturedAt: null,
 };
@@ -82,6 +105,7 @@ export function captureRigConfig(
   fallbackMetersPerUnit: number,
   heightCm: number,
   capturedAt: number,
+  base: RigConfig = DEFAULT_RIG,
 ): RigConfig | null {
   if (!pw || pw.length < 33) return null;
   if (!vis(pw[11]) || !vis(pw[12]) || !vis(pw[23]) || !vis(pw[24])) return null;
@@ -99,6 +123,9 @@ export function captureRigConfig(
   const ankMid = vis(pw[27]) && vis(pw[28]) ? mid(pw[27], pw[28]) : null;
 
   return {
+    // Thickness (radii) and any non-measured fields carry over from `base` so a
+    // re-capture preserves the user's tuned thicknesses.
+    ...base,
     neckCm: dcm(earMid, shMid),
     torsoCm: dcm(shMid, hipMid),
     upperArmCm: avg(dcm(pw[11], pw[13]), dcm(pw[12], pw[14])),

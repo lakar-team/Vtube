@@ -317,6 +317,62 @@ body {
   background: rgba(0, 0, 0, 0.25);
 }
 
+/* Rig Tuner pane: mannequin viewport + a scrollable sliders panel. */
+.pane-tuner {
+  display: flex;
+}
+
+.tuner-viewport {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.tuner-controls {
+  width: 230px;
+  flex: 0 0 230px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border-left: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.tuner-title {
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+
+.tuner-group {
+  margin: 12px 0 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  opacity: 0.75;
+}
+
+.tuner-row {
+  display: grid;
+  grid-template-columns: 70px 1fr 34px;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  margin: 3px 0;
+}
+
+.tuner-row input[type="range"] {
+  width: 100%;
+}
+
+.tuner-val {
+  text-align: right;
+  font-family: ui-monospace, monospace;
+  color: var(--text);
+}
+
 .viewport-status,
 .pane-status {
   position: absolute;

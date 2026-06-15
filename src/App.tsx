@@ -3,19 +3,23 @@ import { WebcamView } from "./components/WebcamView";
 import { AvatarViewport, type ViewMode } from "./components/AvatarViewport";
 import { FaceMeshDebugView } from "./components/FaceMeshDebugView";
 import { RoomViewport } from "./components/RoomViewport";
+import { RigTuner } from "./components/RigTuner";
 import { DebugHUD } from "./components/DebugHUD";
 import { useWebcam } from "./hooks/useWebcam";
 import { useMocap } from "./mocap/useMocap";
-import { captureRigConfig, loadRigConfig, saveRigConfig, type RigConfig } from "./mocap/rig";
+import {
+  captureRigConfig, loadRigConfig, saveRigConfig,
+  DEFAULT_RIG, type RigConfig, type RigNumKey,
+} from "./mocap/rig";
 import type { ExpressionMapping } from "./vrm/expressionMap";
 
-type DisplayMode = "avatar" | "both" | "room";
+type DisplayMode = "avatar" | "both" | "room" | "tuner";
 const DISPLAY_MODE_KEY = "vtube.displayMode";
 
 function loadDisplayMode(): DisplayMode {
   try {
     const v = localStorage.getItem(DISPLAY_MODE_KEY) as DisplayMode | null;
-    return v === "avatar" || v === "both" || v === "room" ? v : "room";
+    return v === "avatar" || v === "both" || v === "room" || v === "tuner" ? v : "room";
   } catch {
     return "room";
   }
@@ -56,6 +60,8 @@ export default function App() {
   const [heightCm, setHeightCm] = useState<number>(loadHeightCm);
   const [roomM, setRoomM] = useState<number>(loadRoomM);
   const [rigConfig, setRigConfig] = useState<RigConfig>(loadRigConfig);
+  const rigConfigRef = useRef(rigConfig);
+  rigConfigRef.current = rigConfig;
   const [countdown, setCountdown] = useState<number | null>(null);
   const captureTimerRef = useRef<number | null>(null);
   const [expressionMap, setExpressionMap] = useState<ExpressionMapping | null>(null);
@@ -96,7 +102,7 @@ export default function App() {
       setCountdown(null);
       const pw = mocap.debugLandmarksRef.current.poseWorld;
       const mpu = mocap.calibrationRef.current?.metersPerUnit ?? 1;
-      const cfg = captureRigConfig(pw, mpu, heightCm, Date.now());
+      const cfg = captureRigConfig(pw, mpu, heightCm, Date.now(), rigConfigRef.current);
       if (cfg) {
         setRigConfig(cfg);
         saveRigConfig(cfg);
@@ -109,6 +115,20 @@ export default function App() {
   useEffect(() => () => {
     if (captureTimerRef.current !== null) window.clearInterval(captureTimerRef.current);
   }, []);
+
+  const changeRigField = (key: RigNumKey, value: number) => {
+    setRigConfig((prev) => {
+      const next = { ...prev, [key]: value };
+      saveRigConfig(next);
+      return next;
+    });
+  };
+
+  const resetRig = () => {
+    const next = { ...DEFAULT_RIG };
+    setRigConfig(next);
+    saveRigConfig(next);
+  };
 
   return (
     <div className="app">
@@ -173,6 +193,7 @@ export default function App() {
             title={
               "Which view to show in the right pane(s):\n" +
               "• room — metric 3D mannequin in a scaled room (drag to orbit)\n" +
+              "• tuner — mannequin + sliders to adjust rig proportions\n" +
               "• avatar — VRM avatar driven by retargeted mocap\n" +
               "• both — avatar + 3D room side by side for direct comparison"
             }
@@ -183,6 +204,7 @@ export default function App() {
               onChange={(e) => changeDisplayMode(e.target.value as DisplayMode)}
             >
               <option value="room">room (3D)</option>
+              <option value="tuner">skeleton &amp; tuner</option>
               <option value="avatar">avatar</option>
               <option value="both">both (avatar + room)</option>
             </select>
@@ -236,6 +258,20 @@ export default function App() {
               mirror={mirror}
               roomM={roomM}
             />
+          </section>
+        )}
+
+        {displayMode === "tuner" && (
+          <section className="pane pane-tuner">
+            <div className="tuner-viewport">
+              <RoomViewport
+                debugLandmarksRef={mocap.debugLandmarksRef}
+                rigConfig={rigConfig}
+                mirror={mirror}
+                roomM={roomM}
+              />
+            </div>
+            <RigTuner rig={rigConfig} onChange={changeRigField} onReset={resetRig} />
           </section>
         )}
       </main>
