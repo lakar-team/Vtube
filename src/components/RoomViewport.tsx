@@ -3,7 +3,7 @@ import type { MutableRefObject } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
-import type { DebugLandmarks } from "../mocap/types";
+import type { DebugLandmarks, MocapFrame } from "../mocap/types";
 import type { RigConfig } from "../mocap/rig";
 import { FACE_CONTOURS, FACE_TRIANGLES } from "./faceMeshData";
 
@@ -44,6 +44,17 @@ const HAND_BONES: ReadonlyArray<readonly [number, number]> = [
   [13, 17], [17, 18], [18, 19], [19, 20],
   [0, 17],
 ];
+// Canonical bone length as a fraction of hand length (wrist→middle-fingertip),
+// matching HAND_BONES order. Finger lengths = fraction × captured handLengthCm
+// (fixed), with live directions — so the hand never rescales with distance.
+const HAND_BONE_FRAC: readonly number[] = [
+  0.28, 0.16, 0.12, 0.10,   // thumb
+  0.46, 0.22, 0.13, 0.09,   // index (palm 0→5, then phalanges)
+  0.07, 0.24, 0.14, 0.09,   // middle
+  0.07, 0.22, 0.13, 0.09,   // ring
+  0.07, 0.18, 0.10, 0.08,   // little
+  0.42,                     // palm edge 0→17 (drawn only)
+];
 
 // Default (T-pose) directions in room space, used when a live direction is missing.
 const D_UP   = new THREE.Vector3(0, 1, 0);
@@ -57,7 +68,6 @@ const D_FOOT = new THREE.Vector3(0, -0.3, 1).normalize();
 const _v2 = new THREE.Vector3();
 const _q  = new THREE.Quaternion();
 const _Y  = new THREE.Vector3(0, 1, 0);
-const _hp = new THREE.Vector3();
 
 function makeCyl(mat: THREE.Material): THREE.Mesh {
   return new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 12, 1), mat);
@@ -95,6 +105,8 @@ interface HandRig {
 
 export interface RoomViewportProps {
   debugLandmarksRef: MutableRefObject<DebugLandmarks>;
+  /** Smoothed mocap frame — read for eye gaze (pupil). */
+  frameRef: MutableRefObject<MocapFrame | null>;
   /** Captured (or tuned) fixed body proportions — drives the whole rig. */
   rigConfig: RigConfig;
   mirror: boolean;
@@ -104,6 +116,7 @@ export interface RoomViewportProps {
 
 export function RoomViewport({
   debugLandmarksRef,
+  frameRef,
   rigConfig,
   mirror,
   roomM,
@@ -200,8 +213,12 @@ export function RoomViewport({
     const faceFillGeom = new THREE.BufferGeometry();
     faceFillGeom.setAttribute("position", facePosAttr);
     faceFillGeom.setIndex(new THREE.BufferAttribute(FACE_TRIANGLES, 1));
+    // Filled surface writes depth normally (so it occludes what's behind it);
+    // polygonOffset pushes it a hair back so the contour overlay sits on top
+    // without z-fighting.
     const matFaceFill = new THREE.MeshLambertMaterial({
-      color: 0xd9a079, side: THREE.DoubleSide, depthTest: false, depthWrite: false,
+      color: 0xd9a079, side: THREE.DoubleSide,
+      polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
     });
     const faceFill = new THREE.Mesh(faceFillGeom, matFaceFill);
     faceFill.frustumCulled = false;
@@ -237,6 +254,18 @@ export function RoomViewport({
     };
     const handLeft = makeHand(matBoneL, matL);
     const handRight = makeHand(matBoneR, matR);
+
+    // ── eyeballs (white) + irises (gaze-driven), on top of the face.
+    const matEye = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false });
+    const matIris = new THREE.MeshBasicMaterial({ color: 0x223a5a, depthTest: false });
+    const mkEyeSph = (mat: THREE.Material, ro: number) => {
+      const m = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), mat);
+      m.frustumCulled = false; m.visible = false; m.renderOrder = ro;
+      figure.add(m);
+      return m;
+    };
+    const mEyeL = mkEyeSph(matEye, 4); const mEyeR = mkEyeSph(matEye, 4);
+    const mIrisL = mkEyeSph(matIris, 5); const mIrisR = mkEyeSph(matIris, 5);
 
     const heldLm: (NormalizedLandmark | null)[] = new Array(33).fill(null);
 
@@ -360,7 +389,7 @@ export function RoomViewport({
       // ── hands: fingers at the FK wrist, sized from the FIXED captured forearm.
       const fist = (wr: THREE.Vector3, el: THREE.Vector3): THREE.Vector3 =>
         wr.clone().addScaledVector(_v2.subVectors(wr, el).normalize(), 0.09);
-      const realHandM = len(rig.lowerArmCm) * 0.75;
+      const handLenM = len(rig.handLengthCm);
       const handR = len(rig.handRcm);
       const lHand = debugLandmarksRef.current.leftHand;
       const rHand = debugLandmarksRef.current.rightHand;
@@ -390,23 +419,24 @@ export function RoomViewport({
           hr.bones.visible = false;
           return false;
         }
-        const lm0 = lm[0], mid = lm[12];
-        const span = Math.hypot(mid.x - lm0.x, mid.y - lm0.y, mid.z - lm0.z);
-        const s = realHandM / Math.max(span, 1e-3);
-        const hp = (i: number): THREE.Vector3 => {
-          const p = lm[i];
-          return _hp.set(
-            wrist.x + mx * (p.x - lm0.x) * s,
-            wrist.y - (p.y - lm0.y) * s,
-            wrist.z - (p.z - lm0.z) * s,
-          );
-        };
-        for (let i = 0; i < 21; i++) placeSph(hr.joints[i], hp(i), R_FINGER_JNT);
+        // FK: fixed bone lengths (canonical fraction × captured hand length),
+        // live bone directions from the image landmarks (scale-invariant).
+        const jp: THREE.Vector3[] = new Array(21);
+        jp[0] = wrist.clone();
+        for (let k = 0; k < 20; k++) {
+          const [a, b] = HAND_BONES[k];
+          const d = new THREE.Vector3(
+            mx * (lm[b].x - lm[a].x),
+            -(lm[b].y - lm[a].y),
+            -(lm[b].z - lm[a].z),
+          ).normalize();
+          jp[b] = jp[a].clone().addScaledVector(d, HAND_BONE_FRAC[k] * handLenM);
+        }
+        for (let i = 0; i < 21; i++) placeSph(hr.joints[i], jp[i], R_FINGER_JNT);
         for (let k = 0; k < HAND_BONES.length; k++) {
           const [a, b] = HAND_BONES[k];
-          const pa = hp(a); const ax = pa.x, ay = pa.y, az = pa.z;
-          const pb = hp(b);
-          hr.bPos[k * 6]     = ax;   hr.bPos[k * 6 + 1] = ay;   hr.bPos[k * 6 + 2] = az;
+          const pa = jp[a], pb = jp[b];
+          hr.bPos[k * 6]     = pa.x; hr.bPos[k * 6 + 1] = pa.y; hr.bPos[k * 6 + 2] = pa.z;
           hr.bPos[k * 6 + 3] = pb.x; hr.bPos[k * 6 + 4] = pb.y; hr.bPos[k * 6 + 5] = pb.z;
         }
         hr.bGeom.attributes.position.needsUpdate = true;
@@ -417,6 +447,23 @@ export function RoomViewport({
       const rFingers = updateHand(handRight, dataForR, wrR);
       placeSph(mHandL, lFingers ? null : fist(wrL, elL), handR);
       placeSph(mHandR, rFingers ? null : fist(wrR, elR), handR);
+
+      // ── eyeballs + gaze (pupil x/y from the smoothed mocap frame, -1..1)
+      const pupil = frameRef.current?.pupil;
+      const eyeRm = len(rig.eyeRcm);
+      const eyeXm = len(rig.eyeXcm), eyeYm = len(rig.eyeYcm), eyeZm = len(rig.eyeZcm);
+      const gx = (pupil ? pupil.x : 0) * eyeRm * 0.55;
+      const gy = (pupil ? pupil.y : 0) * eyeRm * 0.55;
+      const placeEye = (eye: THREE.Mesh, iris: THREE.Mesh, sign: number) => {
+        const ex = headC.x + mx * sign * eyeXm;
+        const ey = headC.y + eyeYm;
+        const ez = headC.z + eyeZm;
+        eye.position.set(ex, ey, ez); eye.scale.setScalar(eyeRm); eye.visible = true;
+        iris.position.set(ex + mx * gx, ey + gy, ez + eyeRm * 0.82);
+        iris.scale.setScalar(eyeRm * 0.45); iris.visible = true;
+      };
+      placeEye(mEyeL, mIrisL, -1);
+      placeEye(mEyeR, mIrisR, 1);
 
       renderer.render(scene, camera);
     });
@@ -441,6 +488,9 @@ export function RoomViewport({
       matL.dispose(); matR.dispose(); matC.dispose();
       matFaceFill.dispose(); matFaceLine.dispose();
       matBoneL.dispose(); matBoneR.dispose();
+      matEye.dispose(); matIris.dispose();
+      mEyeL.geometry.dispose(); mEyeR.geometry.dispose();
+      mIrisL.geometry.dispose(); mIrisR.geometry.dispose();
       grid.dispose();
       (cube.geometry as THREE.BufferGeometry).dispose();
       (cube.material as THREE.Material).dispose();

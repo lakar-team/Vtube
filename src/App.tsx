@@ -254,6 +254,7 @@ export default function App() {
           <section className="pane">
             <RoomViewport
               debugLandmarksRef={mocap.debugLandmarksRef}
+              frameRef={mocap.frameRef}
               rigConfig={rigConfig}
               mirror={mirror}
               roomM={roomM}
@@ -266,6 +267,7 @@ export default function App() {
             <div className="tuner-viewport">
               <RoomViewport
                 debugLandmarksRef={mocap.debugLandmarksRef}
+                frameRef={mocap.frameRef}
                 rigConfig={rigConfig}
                 mirror={mirror}
                 roomM={roomM}

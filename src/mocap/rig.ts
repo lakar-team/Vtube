@@ -33,6 +33,13 @@ export interface RigConfig {
   footRcm: number;
   jointRcm: number;
   handRcm: number;
+  /** Hand length wrist→middle-fingertip (cm) — fixes finger size from capture. */
+  handLengthCm: number;
+  // ── eyeballs (cm) ──
+  eyeRcm: number;   // eyeball radius
+  eyeXcm: number;   // half the eye separation (each eye at ±eyeXcm)
+  eyeYcm: number;   // vertical offset from head centre
+  eyeZcm: number;   // forward offset (onto the face front)
   // ── face mesh fit on the head (tunable) ──
   /** Face-mesh size multiplier relative to the head (1 = head-fit). */
   faceScale: number;
@@ -71,6 +78,11 @@ export const DEFAULT_RIG: RigConfig = {
   footRcm: 3,
   jointRcm: 4,
   handRcm: 6.5,
+  handLengthCm: 19,
+  eyeRcm: 1.3,
+  eyeXcm: 3.2,
+  eyeYcm: 1.5,
+  eyeZcm: 6,
   faceScale: 1,
   faceOffXcm: 0,
   faceOffYcm: 0,
@@ -141,6 +153,7 @@ export function captureRigConfig(
     torsoCm: dcm(shMid, hipMid),
     upperArmCm: avg(dcm(pw[11], pw[13]), dcm(pw[12], pw[14])),
     lowerArmCm: avg(dcm(pw[13], pw[15]), dcm(pw[14], pw[16])),
+    handLengthCm: avg(dcm(pw[13], pw[15]), dcm(pw[14], pw[16])) * 0.75,
     upperLegCm: avg(dcm(pw[23], pw[25]), dcm(pw[24], pw[26])),
     lowerLegCm: avg(dcm(pw[25], pw[27]), dcm(pw[26], pw[28])),
     footCm: avg(dcm(pw[27], pw[31]), dcm(pw[28], pw[32])),

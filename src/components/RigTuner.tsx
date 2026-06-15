@@ -24,6 +24,7 @@ const LENGTHS: Row[] = [
   ["shoulders", "shoulderWidthCm", 15, 70, 0.5],
   ["hips", "hipWidthCm", 10, 60, 0.5],
   ["hip height", "hipHeightCm", 40, 140, 0.5],
+  ["hand length", "handLengthCm", 8, 30, 0.5],
 ];
 
 const HEAD: Row[] = [
@@ -35,6 +36,13 @@ const FACE: Row[] = [
   ["face X", "faceOffXcm", -15, 15, 0.5],
   ["face Y", "faceOffYcm", -15, 15, 0.5],
   ["face Z", "faceOffZcm", -15, 15, 0.5],
+];
+
+const EYES: Row[] = [
+  ["eye size", "eyeRcm", 0.4, 4, 0.1],
+  ["eye sep", "eyeXcm", 0, 8, 0.1],
+  ["eye Y", "eyeYcm", -6, 8, 0.1],
+  ["eye Z", "eyeZcm", 0, 16, 0.1],
 ];
 
 const RADII: Row[] = [
@@ -76,6 +84,8 @@ export function RigTuner({ rig, onChange, onReset }: RigTunerProps) {
       {HEAD.map(slider)}
       <div className="tuner-group">face mesh</div>
       {FACE.map(slider)}
+      <div className="tuner-group">eyes (cm)</div>
+      {EYES.map(slider)}
       <div className="tuner-group">thickness (cm radius)</div>
       {RADII.map(slider)}
       <button type="button" className="btn" onClick={onReset} style={{ marginTop: 10 }}>
