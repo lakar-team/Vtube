@@ -20,6 +20,18 @@ function loadDisplayMode(): DisplayMode {
   }
 }
 
+const HEIGHT_KEY = "vtube.heightCm";
+const DEFAULT_HEIGHT_CM = 170;
+
+function loadHeightCm(): number {
+  try {
+    const v = Number(localStorage.getItem(HEIGHT_KEY));
+    return Number.isFinite(v) && v >= 50 && v <= 250 ? v : DEFAULT_HEIGHT_CM;
+  } catch {
+    return DEFAULT_HEIGHT_CM;
+  }
+}
+
 export default function App() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
@@ -28,6 +40,7 @@ export default function App() {
   const [trackLegs, setTrackLegs] = useState(true);
   const viewMode: ViewMode = "bust";
   const [displayMode, setDisplayMode] = useState<DisplayMode>(loadDisplayMode);
+  const [heightCm, setHeightCm] = useState<number>(loadHeightCm);
   const [expressionMap, setExpressionMap] = useState<ExpressionMapping | null>(null);
 
   const webcam = useWebcam(videoRef);
@@ -35,11 +48,17 @@ export default function App() {
     mirror,
     trackLegs,
     enabled: webcam.ready,
+    heightCm,
   });
 
   const changeDisplayMode = (v: DisplayMode) => {
     setDisplayMode(v);
     try { localStorage.setItem(DISPLAY_MODE_KEY, v); } catch { /* privacy mode */ }
+  };
+
+  const changeHeightCm = (v: number) => {
+    setHeightCm(v);
+    try { localStorage.setItem(HEIGHT_KEY, String(v)); } catch { /* privacy mode */ }
   };
 
   return (
@@ -73,6 +92,19 @@ export default function App() {
               onChange={(e) => setShowOverlay(e.target.checked)}
             />
             landmark overlay
+          </label>
+          <label className="toggle" title="Your real standing height — anchors the metric body calibration for the 3D Room View.">
+            height
+            <input
+              type="number"
+              min={50}
+              max={250}
+              step={1}
+              value={heightCm}
+              onChange={(e) => changeHeightCm(Number(e.target.value))}
+              style={{ width: "3.5em" }}
+            />
+            cm
           </label>
           <label
             className="toggle"
@@ -143,7 +175,7 @@ export default function App() {
           state={mocap.state}
           rawFrameRef={mocap.rawFrameRef}
           frameRef={mocap.frameRef}
-          debugLandmarksRef={mocap.debugLandmarksRef}
+          calibrationRef={mocap.calibrationRef}
           expressionMap={expressionMap}
         />
       </footer>

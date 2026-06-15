@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { MutableRefObject } from "react";
-import type { DebugLandmarks, MocapFrame } from "../mocap/types";
+import type { MocapFrame } from "../mocap/types";
+import type { BodyCalibration } from "../mocap/bodyCalibration";
 import type { MocapState } from "../mocap/useMocap";
 import type { ExpressionMapping } from "../vrm/expressionMap";
 import { fmtFixed, radToDeg } from "../utils/math";
@@ -9,23 +10,15 @@ export interface DebugHUDProps {
   state: MocapState;
   rawFrameRef: MutableRefObject<MocapFrame | null>;
   frameRef: MutableRefObject<MocapFrame | null>;
-  /** Raw landmark arrays — used here for the metric world-landmark sanity row. */
-  debugLandmarksRef: MutableRefObject<DebugLandmarks>;
+  /** Body-size calibration (metric scale + derived real-world sizes). */
+  calibrationRef: MutableRefObject<BodyCalibration | null>;
   /** Per-model blendshape support summary, once the VRM has loaded. */
   expressionMap?: ExpressionMapping | null;
 }
 
-/** Euclidean distance between two {x,y,z} points. */
-function dist3(
-  a: { x: number; y: number; z: number },
-  b: { x: number; y: number; z: number },
-): number {
-  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
-}
-
-/** Meters, fixed width. */
-function m(v: number | null | undefined): string {
-  return v === null || v === undefined ? "  —" : v.toFixed(2);
+/** Centimeters, rounded; em-dash when unavailable. */
+function cm(v: number | null | undefined): string {
+  return v === null || v === undefined ? "—" : v.toFixed(0);
 }
 
 interface HudSample {
@@ -42,9 +35,16 @@ interface HudSample {
   rightArmTracked: boolean;
   leftHandTracked: boolean;
   rightHandTracked: boolean;
-  /** Metric world-landmark sanity numbers (meters, pre-calibration). */
-  worldShoulders: number | null;
-  worldSpan: number | null;
+  /** Body-size calibration readout. */
+  calibrated: boolean;
+  metersPerUnit: number;
+  statureCm: number | null;
+  headCm: number | null;
+  uArmCm: number | null;
+  lArmCm: number | null;
+  uLegCm: number | null;
+  lLegCm: number | null;
+  shoulderCm: number | null;
 }
 
 /** Degrees, fixed width — readouts must never change the HUD's size. */
@@ -71,7 +71,7 @@ export function DebugHUD({
   state,
   rawFrameRef,
   frameRef,
-  debugLandmarksRef,
+  calibrationRef,
   expressionMap,
 }: DebugHUDProps) {
   const [sample, setSample] = useState<HudSample | null>(null);
@@ -82,25 +82,20 @@ export function DebugHUD({
       const sm = frameRef.current;
       if (!raw || !sm) return;
 
-      // Metric world-landmark sanity check (meters, raw MediaPipe scale).
-      // Shoulder width and nose→ankle span confirm worldLandmarks are flowing
-      // and roughly real-sized — the basis for Phase 2 height calibration.
-      const pw = debugLandmarksRef.current.poseWorld;
-      let worldShoulders: number | null = null;
-      let worldSpan: number | null = null;
-      if (pw && pw.length >= 33) {
-        worldShoulders = dist3(pw[11], pw[12]);
-        const ankleMid = {
-          x: (pw[27].x + pw[28].x) / 2,
-          y: (pw[27].y + pw[28].y) / 2,
-          z: (pw[27].z + pw[28].z) / 2,
-        };
-        worldSpan = dist3(pw[0], ankleMid);
-      }
+      // Body-size calibration (metric scale anchored to entered height + the
+      // real-world sizes derived from worldLandmarks).
+      const cal = calibrationRef.current;
 
       setSample({
-        worldShoulders,
-        worldSpan,
+        calibrated: cal?.calibrated ?? false,
+        metersPerUnit: cal?.metersPerUnit ?? 1,
+        statureCm: cal?.measuredStatureCm ?? null,
+        headCm: cal?.headDiameterCm ?? null,
+        uArmCm: cal?.upperArmCm ?? null,
+        lArmCm: cal?.lowerArmCm ?? null,
+        uLegCm: cal?.upperLegCm ?? null,
+        lLegCm: cal?.lowerLegCm ?? null,
+        shoulderCm: cal?.shoulderWidthCm ?? null,
         rawHead: raw.head,
         smHead: sm.head,
         rawBlinkL: raw.expressions.blinkLeft,
@@ -117,7 +112,7 @@ export function DebugHUD({
       });
     }, 200);
     return () => clearInterval(id);
-  }, [rawFrameRef, frameRef, debugLandmarksRef]);
+  }, [rawFrameRef, frameRef, calibrationRef]);
 
   return (
     <div className="debug-hud">
@@ -175,9 +170,20 @@ export function DebugHUD({
           </strong>
         </div>
         <div className="hud-row">
-          <span>world (m)</span>
+          <span>calibration</span>
+          <strong className={`hud-cell-world ${sample?.calibrated ? "ok" : "bad"}`}>
+            {sample?.calibrated
+              ? `scale ${sample.metersPerUnit.toFixed(3)} m/u · stature ${cm(sample.statureCm)}cm`
+              : "stand back (full body) to calibrate"}
+          </strong>
+          <span>head ⌀</span>
+          <strong className="hud-cell-world">{cm(sample?.headCm)} cm</strong>
+        </div>
+        <div className="hud-row">
+          <span>limbs (cm)</span>
           <strong className="hud-cell-world">
-            shoulders {m(sample?.worldShoulders)} · nose→ankle {m(sample?.worldSpan)}
+            arm {cm(sample?.uArmCm)}/{cm(sample?.lArmCm)} · leg{" "}
+            {cm(sample?.uLegCm)}/{cm(sample?.lLegCm)} · shoulders {cm(sample?.shoulderCm)}
           </strong>
         </div>
       </div>

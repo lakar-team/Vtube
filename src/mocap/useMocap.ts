@@ -8,6 +8,7 @@ import type {
 import { createLandmarkers, type Landmarkers } from "./landmarkers";
 import { solveMocapFrame } from "./kalidokitAdapter";
 import { directSmoothFrame, FilterBank } from "./smoothing";
+import { updateBodyCalibration, type BodyCalibration } from "./bodyCalibration";
 import type { DebugLandmarks, MocapFrame } from "./types";
 
 export type MocapStatus = "idle" | "loading" | "running" | "error";
@@ -28,6 +29,8 @@ export interface UseMocapResult {
   rawFrameRef: MutableRefObject<MocapFrame | null>;
   /** Latest landmark arrays for the webcam debug overlay. */
   debugLandmarksRef: MutableRefObject<DebugLandmarks>;
+  /** Latest body-size calibration (metric scale + derived real-world sizes). */
+  calibrationRef: MutableRefObject<BodyCalibration | null>;
   state: MocapState;
 }
 
@@ -61,6 +64,8 @@ export function useMocap(
     mirror: boolean;
     trackLegs: boolean;
     enabled: boolean;
+    /** User's real standing height (cm) — anchors metric body calibration. */
+    heightCm: number;
   },
 ): UseMocapResult {
   const frameRef = useRef<MocapFrame | null>(null);
@@ -72,6 +77,7 @@ export function useMocap(
     leftHand: null,
     rightHand: null,
   });
+  const calibrationRef = useRef<BodyCalibration | null>(null);
 
   const [state, setState] = useState<MocapState>(INITIAL_STATE);
 
@@ -80,6 +86,8 @@ export function useMocap(
   mirrorRef.current = options.mirror;
   const trackLegsRef = useRef(options.trackLegs);
   trackLegsRef.current = options.trackLegs;
+  const heightCmRef = useRef(options.heightCm);
+  heightCmRef.current = options.heightCm;
   const bankRef = useRef<FilterBank>(new FilterBank());
 
   useEffect(() => {
@@ -151,6 +159,11 @@ export function useMocap(
 
       rawFrameRef.current = raw;
       debugLandmarksRef.current = debug;
+      calibrationRef.current = updateBodyCalibration(
+        calibrationRef.current,
+        debug.poseWorld,
+        heightCmRef.current,
+      );
 
       frameRef.current = directSmoothFrame(bankRef.current, raw);
 
@@ -183,6 +196,7 @@ export function useMocap(
     frameRef,
     rawFrameRef,
     debugLandmarksRef,
+    calibrationRef,
     state,
   };
 }
