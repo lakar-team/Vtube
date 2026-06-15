@@ -40,7 +40,7 @@ const R_ULEG = 0.070;
 const R_LLEG = 0.050;
 const R_FOOT = 0.030;
 const R_JNT = 0.040;
-const R_HAND = 0.045;
+const R_HAND = 0.065; // "fist" — deliberately larger than the wrist joint so it reads as a hand
 
 // Pose landmark indices.
 const NOSE = 0, EAR_L = 7, EAR_R = 8;
@@ -146,7 +146,7 @@ export function RoomViewport({
     const figure = new THREE.Group();
     scene.add(figure);
 
-    const mHead  = makeSph(0.5, matC); // unit sphere; radius set via scale each frame
+    const mHead  = makeSph(1, matC); // unit-radius sphere; scaled to head radius each frame
     const mNeck  = makeCyl(R_NECK, matC);
     const mTorso = makeCyl(R_TORSO, matC);
 
@@ -210,12 +210,17 @@ export function RoomViewport({
         return local({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 });
       };
 
-      const earL = W(EAR_L), earR = W(EAR_R), nose = W(NOSE);
-      const headCenter = earL && earR
-        ? earL.clone().add(earR).multiplyScalar(0.5)
-        : nose;
       const midSh = M(SH_L, SH_R);
       const midHip = M(HIP_L, HIP_R);
+
+      // Head centre: ear-midpoint → nose → (fallback) ~22cm above the shoulders,
+      // so the head still shows when the pose face landmarks drop out.
+      const earL = W(EAR_L), earR = W(EAR_R), nose = W(NOSE);
+      const headCenter =
+        earL && earR ? earL.clone().add(earR).multiplyScalar(0.5)
+        : nose ? nose
+        : midSh ? midSh.clone().add(new THREE.Vector3(0, 0.22, 0))
+        : null;
 
       const shL = W(SH_L), shR = W(SH_R);
       const elL = W(EL_L), elR = W(EL_R);
@@ -225,15 +230,24 @@ export function RoomViewport({
       const anL = W(AN_L), anR = W(AN_R);
       const toeL = W(TOE_L), toeR = W(TOE_R);
 
-      // head sized from calibration (diameter → radius, meters)
-      const headR = (cal?.headDiameterCm ? cal.headDiameterCm / 100 : DEFAULT_HEAD_DIAMETER_M) / 2;
+      // Hand "fist": just beyond the wrist along the forearm, so it sits where
+      // the hand is rather than on top of the wrist joint sphere.
+      const fist = (wr: THREE.Vector3 | null, el: THREE.Vector3 | null): THREE.Vector3 | null => {
+        if (!wr) return null;
+        if (!el) return wr;
+        return wr.clone().addScaledVector(_v2.subVectors(wr, el).normalize(), 0.09);
+      };
+
+      // head sized from calibration (ear-to-ear ≈ head width → sphere radius)
+      const headDiamM = cal?.headDiameterCm ? cal.headDiameterCm / 100 : DEFAULT_HEAD_DIAMETER_M;
+      const headR = Math.max(headDiamM * 0.65, 0.07);
       placeSph(mHead, headCenter, headR);
       placeCyl(mNeck, headCenter, midSh);
       placeCyl(mTorso, midSh, midHip);
 
       placeCyl(mUArmL, shL, elL);  placeCyl(mUArmR, shR, elR);
       placeCyl(mLArmL, elL, wrL);  placeCyl(mLArmR, elR, wrR);
-      placeSph(mHandL, wrL);        placeSph(mHandR, wrR);
+      placeSph(mHandL, fist(wrL, elL)); placeSph(mHandR, fist(wrR, elR));
       placeCyl(mULegL, hipL, knL); placeCyl(mULegR, hipR, knR);
       placeCyl(mLLegL, knL, anL);  placeCyl(mLLegR, knR, anR);
       placeCyl(mFootL, anL, toeL); placeCyl(mFootR, anR, toeR);
