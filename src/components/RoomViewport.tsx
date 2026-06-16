@@ -392,7 +392,6 @@ export function RoomViewport({
       const o = lmOptsRef.current;
       const alpha = o.smoothing ? Math.max(0.04, 1 - o.smoothAmount) : 1;
       const pw = procLm(poseProc, debugLandmarksRef.current.poseWorld, o.persistPose, o.smoothing, alpha);
-      const poseImg = debugLandmarksRef.current.pose;
       const rig = rigRef.current;
       if (rig.skinHex !== lastSkin) { lastSkin = rig.skinHex; applySkin(rig.skinHex); }
       const mx = mirrorRef.current ? -1 : 1;
@@ -554,24 +553,15 @@ export function RoomViewport({
         wr.clone().addScaledVector(_v2.subVectors(wr, el).normalize(), 0.09);
       const handLenM = len(rig.handLengthCm);
       const handR = len(rig.handRcm);
-      const lHand = procLm(handLProc, debugLandmarksRef.current.leftHand, o.persistHands, o.smoothing, alpha);
-      const rHand = procLm(handRProc, debugLandmarksRef.current.rightHand, o.persistHands, o.smoothing, alpha);
-      const wristSide = (hd: NormalizedLandmark[] | null): "L" | "R" | null => {
-        if (!hd || !hd[0] || !poseImg) return null;
-        const hw = hd[0];
-        const pl = poseImg[WR_L], pr = poseImg[WR_R];
-        const dl = pl ? Math.hypot(hw.x - pl.x, hw.y - pl.y) : Infinity;
-        const dr = pr ? Math.hypot(hw.x - pr.x, hw.y - pr.y) : Infinity;
-        if (dl === Infinity && dr === Infinity) return null;
-        return dl <= dr ? "L" : "R";
-      };
-      let dataForL: NormalizedLandmark[] | null = null;
-      let dataForR: NormalizedLandmark[] | null = null;
-      for (const hd of [lHand, rHand]) {
-        const side = wristSide(hd);
-        if (side === "L") dataForL = hd;
-        else if (side === "R") dataForR = hd;
-      }
+      // The leftHand/rightHand streams are ALREADY anatomically labelled (and
+      // mirror-corrected) upstream in solveMocapFrame, so map each straight onto
+      // the matching FK wrist. The previous re-classification compared against the
+      // live pose wrists (poseImg); when the body left frame that gate returned
+      // null and dropped the held hands — directly contradicting hand persistence.
+      // Direct mapping keeps a held/raised hand visible whether or not the body is
+      // tracked (procLm already holds the last-good finger landmarks).
+      const dataForL = procLm(handLProc, debugLandmarksRef.current.leftHand, o.persistHands, o.smoothing, alpha);
+      const dataForR = procLm(handRProc, debugLandmarksRef.current.rightHand, o.persistHands, o.smoothing, alpha);
       const updateHand = (
         hr: HandRig,
         lm: NormalizedLandmark[] | null,
@@ -646,8 +636,11 @@ export function RoomViewport({
       const gx = (pupil ? pupil.x : 0) * eyeRm * 0.55;
       const gy = (pupil ? pupil.y : 0) * eyeRm * 0.55;
       if (!faceValid) {
-        faceO.copy(headC);
+        // No face: a head-local frame whose anchor sits on the FRONT SURFACE of
+        // the head sphere (not its centre), so the small face-local eyeZ keeps
+        // the eyes on the head instead of buried inside it.
         faceR.set(mx, 0, 0); faceU.set(0, 1, 0); faceF.set(0, 0, 1);
+        faceO.copy(headC).addScaledVector(faceF, headR);
       }
       const placeEye = (eye: THREE.Mesh, iris: THREE.Mesh, sign: number) => {
         const ep = faceO.clone()

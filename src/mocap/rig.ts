@@ -45,11 +45,11 @@ export interface RigConfig {
   fingerMiddle: number;
   fingerRing: number;
   fingerLittle: number;
-  // ── eyeballs (cm) ──
+  // ── eyeballs (cm), in FACE-LOCAL space (face surface anchor + R/U/F basis) ──
   eyeRcm: number;   // eyeball radius
-  eyeXcm: number;   // half the eye separation (each eye at ±eyeXcm)
-  eyeYcm: number;   // vertical offset from head centre
-  eyeZcm: number;   // forward offset (onto the face front)
+  eyeXcm: number;   // half the eye separation (each eye at ±eyeXcm along face-right)
+  eyeYcm: number;   // vertical offset above the face anchor (face-up)
+  eyeZcm: number;   // small forward offset off the face surface (face-forward)
   // ── face mesh fit on the head (tunable) ──
   /** Face-mesh size multiplier relative to the head (1 = head-fit). */
   faceScale: number;
@@ -100,8 +100,8 @@ export const DEFAULT_RIG: RigConfig = {
   fingerLittle: 1,
   eyeRcm: 1.3,
   eyeXcm: 3.2,
-  eyeYcm: 1.5,
-  eyeZcm: 6,
+  eyeYcm: 3,
+  eyeZcm: 1.5,
   faceScale: 1,
   faceOffXcm: 0,
   faceOffYcm: 0,

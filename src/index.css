@@ -383,6 +383,28 @@ body {
   width: 100%;
 }
 
+.tuner-num {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 2px 4px;
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.tuner-unit {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.tuner-copy {
+  width: 100%;
+  margin: 6px 0 2px;
+}
+
 .tuner-val {
   text-align: right;
   font-family: ui-monospace, monospace;
