@@ -1,9 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { WebcamView } from "./components/WebcamView";
-import { AvatarViewport, type ViewMode } from "./components/AvatarViewport";
 import { FaceMeshDebugView } from "./components/FaceMeshDebugView";
 import { RoomViewport, DEFAULT_RULES, type RuleFlags } from "./components/RoomViewport";
-import { VrmRoomViewport } from "./components/VrmRoomViewport";
 import { RigTuner } from "./components/RigTuner";
 import { RulesInspector, type RuleToggleItem } from "./components/RulesInspector";
 import { DebugHUD } from "./components/DebugHUD";
@@ -13,16 +11,14 @@ import {
   captureRigConfig, loadRigConfig, saveRigConfig,
   DEFAULT_RIG, type RigConfig, type RigNumKey,
 } from "./mocap/rig";
-import type { ExpressionMapping } from "./vrm/expressionMap";
 
-type DisplayMode = "avatar" | "both" | "room" | "tuner" | "rules" | "vrmroom";
+type DisplayMode = "room" | "tuner" | "rules" | "facemesh";
 const DISPLAY_MODE_KEY = "vtube.displayMode";
 
 function loadDisplayMode(): DisplayMode {
   try {
     const v = localStorage.getItem(DISPLAY_MODE_KEY) as DisplayMode | null;
-    return v === "avatar" || v === "both" || v === "room" || v === "tuner" || v === "rules" || v === "vrmroom"
-      ? v : "room";
+    return v === "room" || v === "tuner" || v === "rules" || v === "facemesh" ? v : "room";
   } catch {
     return "room";
   }
@@ -75,7 +71,6 @@ export default function App() {
   const [mirror, setMirror] = useState(true);
   const [showOverlay, setShowOverlay] = useState(true);
   const [trackLegs, setTrackLegs] = useState(true);
-  const viewMode: ViewMode = "bust";
   const [displayMode, setDisplayMode] = useState<DisplayMode>(loadDisplayMode);
   const [heightCm, setHeightCm] = useState<number>(loadHeightCm);
   const [roomM, setRoomM] = useState<number>(loadRoomM);
@@ -97,7 +92,6 @@ export default function App() {
   };
   const [countdown, setCountdown] = useState<number | null>(null);
   const captureTimerRef = useRef<number | null>(null);
-  const [expressionMap, setExpressionMap] = useState<ExpressionMapping | null>(null);
 
   const webcam = useWebcam(videoRef);
   const mocap = useMocap(videoRef, {
@@ -322,11 +316,11 @@ export default function App() {
           <label
             className="toggle"
             title={
-              "Which view to show in the right pane(s):\n" +
+              "Which view to show in the right pane:\n" +
               "• room — metric 3D mannequin in a scaled room (drag to orbit)\n" +
               "• tuner — mannequin + sliders to adjust rig proportions\n" +
-              "• avatar — VRM avatar driven by retargeted mocap\n" +
-              "• both — avatar + 3D room side by side for direct comparison"
+              "• rules — mannequin + live processing-rule toggles\n" +
+              "• face mesh — the tracked 468-point face landmarks"
             }
           >
             view
@@ -337,9 +331,7 @@ export default function App() {
               <option value="room">room (3D)</option>
               <option value="tuner">skeleton &amp; tuner</option>
               <option value="rules">rules inspector</option>
-              <option value="vrmroom">vrm (3D room)</option>
-              <option value="avatar">avatar</option>
-              <option value="both">both (avatar + room)</option>
+              <option value="facemesh">face mesh</option>
             </select>
           </label>
           <button
@@ -365,7 +357,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className={`panes${displayMode === "both" ? " panes-three" : ""}`}>
+      <main className="panes">
         <section className="pane pane-left">
           <WebcamView
             videoRef={videoRef}
@@ -379,22 +371,7 @@ export default function App() {
           )}
         </section>
 
-        {(displayMode === "avatar" || displayMode === "both") && (
-          <section className="pane pane-avatar">
-            <div className="avatar-stack-top">
-              <AvatarViewport
-                frameRef={mocap.frameRef}
-                viewMode={viewMode}
-                onExpressionMap={setExpressionMap}
-              />
-            </div>
-            <div className="avatar-stack-bottom">
-              <FaceMeshDebugView debugLandmarksRef={mocap.debugLandmarksRef} />
-            </div>
-          </section>
-        )}
-
-        {(displayMode === "room" || displayMode === "both") && (
+        {displayMode === "room" && (
           <section className="pane">
             <RoomViewport
               debugLandmarksRef={mocap.debugLandmarksRef}
@@ -448,14 +425,9 @@ export default function App() {
           </section>
         )}
 
-        {displayMode === "vrmroom" && (
+        {displayMode === "facemesh" && (
           <section className="pane">
-            <VrmRoomViewport
-              frameRef={mocap.frameRef}
-              roomM={roomM}
-              heightCm={heightCm}
-              onExpressionMap={setExpressionMap}
-            />
+            <FaceMeshDebugView debugLandmarksRef={mocap.debugLandmarksRef} />
           </section>
         )}
       </main>
@@ -467,7 +439,6 @@ export default function App() {
           frameRef={mocap.frameRef}
           calibrationRef={mocap.calibrationRef}
           rigConfig={rigConfig}
-          expressionMap={expressionMap}
         />
       </footer>
 

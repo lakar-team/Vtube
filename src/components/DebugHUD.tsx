@@ -4,7 +4,6 @@ import type { MocapFrame } from "../mocap/types";
 import type { BodyCalibration } from "../mocap/bodyCalibration";
 import type { RigConfig } from "../mocap/rig";
 import type { MocapState } from "../mocap/useMocap";
-import type { ExpressionMapping } from "../vrm/expressionMap";
 import { fmtFixed, radToDeg } from "../utils/math";
 
 export interface DebugHUDProps {
@@ -15,8 +14,6 @@ export interface DebugHUDProps {
   calibrationRef: MutableRefObject<BodyCalibration | null>;
   /** Captured (or default) fixed body proportions for the 3D mannequin. */
   rigConfig: RigConfig;
-  /** Per-model blendshape support summary, once the VRM has loaded. */
-  expressionMap?: ExpressionMapping | null;
 }
 
 /** Centimeters, rounded; em-dash when unavailable. */
@@ -76,7 +73,6 @@ export function DebugHUD({
   frameRef,
   calibrationRef,
   rigConfig,
-  expressionMap,
 }: DebugHUDProps) {
   const [sample, setSample] = useState<HudSample | null>(null);
 
@@ -167,12 +163,6 @@ export function DebugHUD({
               : "out of frame"}
           </strong>
         </div>
-        <div className="hud-row hud-expr-support">
-          <span>blendshapes</span>
-          <strong>
-            {expressionMap ? `${expressionMap.map.size}/${expressionMap.total} supported` : "—"}
-          </strong>
-        </div>
         <div className="hud-row">
           <span>calibration</span>
           <strong className={`hud-cell-world ${sample?.calibrated ? "ok" : "bad"}`}>
@@ -236,16 +226,9 @@ export function DebugHUD({
           </tr>
         </tbody>
       </table>
-      {((expressionMap && expressionMap.unsupported.length > 0) || state.error) && (
+      {state.error && (
         <div className="hud-notes">
-          {expressionMap && expressionMap.unsupported.length > 0 && (
-            <div className="hud-warning">
-              This model doesn't support {expressionMap.unsupported.length} mocap
-              channel{expressionMap.unsupported.length === 1 ? "" : "s"} (skipped):{" "}
-              {expressionMap.unsupported.join(", ")}
-            </div>
-          )}
-          {state.error && <div className="hud-error">{state.error}</div>}
+          <div className="hud-error">{state.error}</div>
         </div>
       )}
     </div>

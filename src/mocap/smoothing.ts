@@ -277,8 +277,8 @@ function slewEuler(
 /**
  * Direct-mode smoother: near-passthrough One Euro (kills only true outlier
  * spikes from MediaPipe landmark teleports). No slew limits, no spine deadzone.
- * The rig layer (applyMocapToVRM with direct=true) also removes all per-frame
- * lerp lag and dampening constants so the avatar responds in real time.
+ * The consumer reads the smoothed frame directly each render tick, so there is
+ * no per-frame lerp lag or dampening — the mannequin responds in real time.
  */
 export function directSmoothFrame(bank: FilterBank, frame: MocapFrame): MocapFrame {
   const t = frame.t;

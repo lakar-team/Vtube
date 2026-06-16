@@ -2,7 +2,7 @@
   "name": "vtube",
   "private": true,
   "version": "0.1.0",
-  "description": "Webcam-driven VRM avatar: MediaPipe face/pose tracking + Kalidokit retargeting + One Euro smoothing. Milestone 1: accurate, calibrated mocap.",
+  "description": "Webcam-driven 3D mocap: MediaPipe face/pose/hand tracking + Kalidokit solve + One Euro smoothing, rendered as a fixed-proportion skeleton mannequin in a metric room.",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,7 +12,6 @@
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^0.10.14",
-    "@pixiv/three-vrm": "^3.1.4",
     "kalidokit": "^1.1.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

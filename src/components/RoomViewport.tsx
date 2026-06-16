@@ -31,6 +31,7 @@ const ROOM_DEFAULT = 2.5;
 const LIMB_TAPER = 0.72;        // distal-end radius as a fraction of the proximal end
 const FACE_W_FIT = 0.92;        // rendered face width as a fraction of the head diameter (at faceScale 1)
 const FALLBACK_FACE_W = 0.13;   // constant cheek-hinge width used when cheekHingeNorm is OFF
+const HEAD_SPHERE_FIT = 0.72;   // visible head-sphere radius vs headR — shrunk so it sits BEHIND the eyes
 
 const NOSE = 0, EAR_L = 7, EAR_R = 8;
 const SH_L = 11, SH_R = 12, EL_L = 13, EL_R = 14, WR_L = 15, WR_R = 16;
@@ -251,7 +252,7 @@ export function RoomViewport({
     const w0 = container.clientWidth;
     const h0 = Math.max(container.clientHeight, 1);
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, stencil: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(w0, h0);
     container.appendChild(renderer.domElement);
@@ -330,10 +331,14 @@ export function RoomViewport({
     const faceFillGeom = new THREE.BufferGeometry();
     faceFillGeom.setAttribute("position", facePosAttr);
     faceFillGeom.setIndex(new THREE.BufferAttribute(FACE_TRIANGLES, 1));
+    // Stencil-tested: draws only where the eye masks did NOT write ref=1, so the
+    // eye openings become smooth holes in the otherwise-solid surface.
     const matFaceFill = new THREE.MeshLambertMaterial({
       color: 0xd9a079, side: THREE.FrontSide,
       transparent: false, opacity: 1, depthTest: true, depthWrite: true,
       polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
+      stencilWrite: true, stencilRef: 1, stencilFunc: THREE.NotEqualStencilFunc,
+      stencilFail: THREE.KeepStencilOp, stencilZFail: THREE.KeepStencilOp, stencilZPass: THREE.KeepStencilOp,
     });
     const faceFill = new THREE.Mesh(faceFillGeom, matFaceFill);
     faceFill.frustumCulled = false;
@@ -356,8 +361,10 @@ export function RoomViewport({
     faceLine.visible = false;
     figure.add(faceLine);
 
-    // Eye sockets: a smooth almond polygon (triangle fan over the eyelid ring)
-    // per eye, dark, painted on top of the face — the socket the eyeball sits in.
+    // Eye masks: a smooth almond polygon (triangle fan over the eyelid ring) per
+    // eye. Rendered BEFORE the face writing stencil ref=1 (no colour/depth) — it
+    // punches a smooth eye-shaped HOLE in the face, through which the recessed,
+    // depth-tested eyeball shows (and is hidden by a hand passing in front).
     const makeSocket = () => {
       const pos = new Float32Array(17 * 3); // centroid + 16 ring points
       const geom = new THREE.BufferGeometry();
@@ -366,10 +373,12 @@ export function RoomViewport({
       for (let k = 0; k < 16; k++) idx.push(0, 1 + k, 1 + ((k + 1) % 16));
       geom.setIndex(idx);
       const mat = new THREE.MeshBasicMaterial({
-        color: 0x14141c, side: THREE.DoubleSide, depthTest: false, depthWrite: false,
+        side: THREE.DoubleSide, colorWrite: false, depthTest: false, depthWrite: false,
+        stencilWrite: true, stencilRef: 1, stencilFunc: THREE.AlwaysStencilFunc,
+        stencilZPass: THREE.ReplaceStencilOp, stencilZFail: THREE.ReplaceStencilOp,
       });
       const mesh = new THREE.Mesh(geom, mat);
-      mesh.frustumCulled = false; mesh.renderOrder = 4; mesh.visible = false;
+      mesh.frustumCulled = false; mesh.renderOrder = 1; mesh.visible = false;
       figure.add(mesh);
       return { mesh, geom, pos };
     };
@@ -392,20 +401,23 @@ export function RoomViewport({
     const handLeft = makeHand(matL);
     const handRight = makeHand(matR);
 
-    // ── eyeballs (white) + irises (gaze-driven), painted on top of the dark eye
-    //    sockets (depthTest off → always read on the eye area).
-    const matEye = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false, depthWrite: false });
-    const matIris = new THREE.MeshBasicMaterial({ color: 0x223a5a, depthTest: false, depthWrite: false });
+    // ── eyeballs (white) + irises (gaze-driven). DEPTH-TESTED + depth-writing:
+    //    they sit recessed behind the face and show only through the stencil eye
+    //    holes (the solid face occludes them elsewhere), and a hand passing in
+    //    front of the face occludes them too. The head sphere is shrunk (below) so
+    //    it doesn't cover the eye area.
+    const matEye = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: true, depthWrite: true });
+    const matIris = new THREE.MeshBasicMaterial({ color: 0x223a5a, depthTest: true, depthWrite: true });
     const mkEyeSph = (mat: THREE.Material, ro: number) => {
       const m = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), mat);
       m.frustumCulled = false; m.visible = false; m.renderOrder = ro;
       figure.add(m);
       return m;
     };
-    // renderOrder 5/6 — painted on top of the face + sockets (the eyeball sits
-    // in its dark socket), depthTest off so it always reads on the eye area.
-    const mEyeL = mkEyeSph(matEye, 5); const mEyeR = mkEyeSph(matEye, 5);
-    const mIrisL = mkEyeSph(matIris, 6); const mIrisR = mkEyeSph(matIris, 6);
+    // renderOrder 4/5 — after the face (2) so face depth is written first; depth
+    // then governs visibility (through the eye holes, behind hands).
+    const mEyeL = mkEyeSph(matEye, 4); const mEyeR = mkEyeSph(matEye, 4);
+    const mIrisL = mkEyeSph(matIris, 5); const mIrisR = mkEyeSph(matIris, 5);
 
     // ── per-stream persistence (hold-last-good) + EMA smoothing ──
     interface LmProc { held: NormalizedLandmark[] | null; sm: NormalizedLandmark[] | null; }
@@ -533,7 +545,7 @@ export function RoomViewport({
 
       const headR = Math.max(len(rig.headDiameterCm) * 0.65, 0.04);
       const jR = len(rig.jointRcm);
-      placeSph(mHead, headC, headR);
+      placeSph(mHead, headC, headR * HEAD_SPHERE_FIT);
       placeCyl(mNeck, headC, shMid, len(rig.neckRcm));
       placeCyl(mTorso, shMid, hipMid, len(rig.torsoRcm));
 

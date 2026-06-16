@@ -51,7 +51,7 @@ const INITIAL_STATE: MocapState = {
  *     -> Kalidokit Face/Pose/Hand solve (kalidokitAdapter)
  *     -> calibration offsets (calibration.ts)
  *     -> One Euro filter bank (smoothing.ts)
- *     -> frameRef (consumed by AvatarViewport each render frame)
+ *     -> frameRef (consumed by RoomViewport each render frame)
  *
  * Results are published through refs, not state — the pipeline runs at video
  * rate and must not trigger React re-renders. Only the HUD-facing summary
