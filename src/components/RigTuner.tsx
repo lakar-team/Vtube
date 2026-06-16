@@ -43,10 +43,10 @@ const HEAD: Row[] = [
 ];
 
 const FACE: Row[] = [
-  ["face scale", "faceScale", 0.3, 2.5, 0.05],
-  ["face X", "faceOffXcm", -15, 15, 0.5],
-  ["face Y", "faceOffYcm", -15, 15, 0.5],
-  ["face Z", "faceOffZcm", -15, 15, 0.5],
+  ["face scale", "faceScale", 0.1, 5, 0.05],
+  ["face X", "faceOffXcm", -25, 25, 0.5],
+  ["face Y", "faceOffYcm", -25, 25, 0.5],
+  ["face Z", "faceOffZcm", -25, 25, 0.5],
 ];
 
 const EYES: Row[] = [
@@ -65,15 +65,17 @@ const FINGERS: Row[] = [
 ];
 
 const RADII: Row[] = [
-  ["neck R", "neckRcm", 0.5, 15, 0.1],
-  ["torso R", "torsoRcm", 1, 20, 0.1],
-  ["upper arm R", "upperArmRcm", 0.5, 15, 0.1],
-  ["lower arm R", "lowerArmRcm", 0.5, 12, 0.1],
-  ["upper leg R", "upperLegRcm", 1, 18, 0.1],
-  ["lower leg R", "lowerLegRcm", 1, 15, 0.1],
-  ["foot R", "footRcm", 0.5, 10, 0.1],
-  ["joints R", "jointRcm", 0.5, 12, 0.1],
-  ["hands R", "handRcm", 1, 15, 0.1],
+  ["neck R", "neckRcm", 0.5, 20, 0.1],
+  ["torso R", "torsoRcm", 1, 30, 0.1],
+  ["upper arm R", "upperArmRcm", 0.5, 20, 0.1],
+  ["lower arm R", "lowerArmRcm", 0.5, 18, 0.1],
+  ["upper leg R", "upperLegRcm", 1, 25, 0.1],
+  ["lower leg R", "lowerLegRcm", 1, 22, 0.1],
+  ["foot R", "footRcm", 0.5, 15, 0.1],
+  ["joints R", "jointRcm", 0.5, 15, 0.1],
+  ["hands R", "handRcm", 1, 20, 0.1],
+  ["finger R", "fingerRcm", 0.2, 5, 0.05],
+  ["palm R", "palmRcm", 0.3, 10, 0.1],
 ];
 
 export function RigTuner({ rig, onChange, onReset, onSnapEyes, onSkinChange }: RigTunerProps) {

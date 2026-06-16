@@ -29,6 +29,7 @@ import { FACE_CONTOURS, FACE_TRIANGLES } from "./faceMeshData";
 const MIN_VIS = 0.5;
 const ROOM_DEFAULT = 2.5;
 const LIMB_TAPER = 0.72;        // distal-end radius as a fraction of the proximal end
+const FACE_W_FIT = 0.92;        // rendered face width as a fraction of the head diameter (at faceScale 1)
 
 const NOSE = 0, EAR_L = 7, EAR_R = 8;
 const SH_L = 11, SH_R = 12, EL_L = 13, EL_R = 14, WR_L = 15, WR_R = 16;
@@ -90,6 +91,10 @@ const D_UARM_REST_R = new THREE.Vector3( 0.45, -0.89, 0).normalize();
 const D_LARM_REST_L = new THREE.Vector3(-0.28, -0.96, 0.02).normalize();
 const D_LARM_REST_R = new THREE.Vector3( 0.28, -0.96, 0.02).normalize();
 
+// Palm-fan metacarpal bones (wrist/knuckle web): NOT drawn as thin cylinders —
+// the palm is rendered as one flattened box instead. Keyed by HAND_BONES index.
+const PALM_FAN_BONES = new Set<number>([4, 8, 12, 16]);
+
 // ─── shared temporaries ───────────────────────────────────────────────────
 const _v2 = new THREE.Vector3();
 const _q  = new THREE.Quaternion();
@@ -97,6 +102,11 @@ const _Y  = new THREE.Vector3(0, 1, 0);
 const _fUp   = new THREE.Vector3();
 const _fSide = new THREE.Vector3();
 const _fN    = new THREE.Vector3();
+const _pU = new THREE.Vector3();
+const _pW = new THREE.Vector3();
+const _pR = new THREE.Vector3();
+const _pF = new THREE.Vector3();
+const _pC = new THREE.Vector3();
 
 /** Unit cylinder, optionally tapered: top (distal, +Y) radius = `taper` × bottom. */
 function makeCyl(mat: THREE.Material, taper = 1): THREE.Mesh {
@@ -125,10 +135,25 @@ function placeSph(mesh: THREE.Mesh, p: THREE.Vector3 | null, radius: number): vo
   mesh.position.copy(p);
   mesh.scale.setScalar(radius);
 }
+const _m4 = new THREE.Matrix4();
+/** Place a unit box at `center`, oriented by an orthonormal basis (x,y,z), with
+ *  full extents (sx,sy,sz) in meters. */
+function placeBox(
+  mesh: THREE.Mesh, center: THREE.Vector3,
+  x: THREE.Vector3, y: THREE.Vector3, z: THREE.Vector3,
+  sx: number, sy: number, sz: number,
+): void {
+  _m4.makeBasis(x, y, z);
+  mesh.quaternion.setFromRotationMatrix(_m4);
+  mesh.position.copy(center);
+  mesh.scale.set(sx, sy, sz);
+  mesh.visible = true;
+}
 
 interface HandRig {
   joints: THREE.Mesh[];   // 21 small spheres (rounded knuckle/tip caps)
   bones: THREE.Mesh[];    // 21 tapered cylinders, one per HAND_BONES entry
+  palm: THREE.Mesh;       // flattened box across the metacarpals
 }
 
 /** Landmark persistence (hold-last-good) + temporal smoothing options. */
@@ -291,7 +316,9 @@ export function RoomViewport({
       const bones = Array.from({ length: HAND_BONES.length }, () => {
         const m = makeCyl(mat, 0.7); m.frustumCulled = false; m.visible = false; figure.add(m); return m;
       });
-      return { joints, bones };
+      const palm = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat);
+      palm.frustumCulled = false; palm.visible = false; figure.add(palm);
+      return { joints, bones, palm };
     };
     const handLeft = makeHand(matL);
     const handRight = makeHand(matR);
@@ -337,9 +364,6 @@ export function RoomViewport({
     };
 
     let disposed = false;
-    // Image→metric scale (m per normalized-image-unit) for the face, derived
-    // from the pose ear width and held across frames where the ears drop out.
-    let lastMetersPerNorm = 0;
 
     // Skin tone — recolour materials only when rig.skinHex changes. Head/neck/
     // torso/face use the pure skin colour; limbs keep a 75/25 blue/red tint so
@@ -376,14 +400,14 @@ export function RoomViewport({
 
       figure.position.set(0, len(rig.hipHeightCm), 0);
 
-      // Body "tracked" = the four torso anchors are confidently visible. When
-      // they aren't (body out of frame, or the subject walked up close), we stop
-      // trusting the held/extrapolated landmarks for the skeleton and fall the
-      // whole rig back to the standing rest pose below — rather than collapsing
-      // into a curled/fetal shape.
+      // Legs "tracked" = hips + knees confidently visible. When they aren't
+      // (lower body out of frame, e.g. the subject walked up close) ONLY the legs
+      // snap to the straight-down rest pose, so the mannequin doesn't fold into a
+      // fetal crouch at the bottom. The UPPER body keeps its held/live pose
+      // (persistence), so a hand raised to the camera still shows — we never
+      // force the arms to a rest pose here.
       const visOk = (i: number) => { const l = pw?.[i]; return !!l && (l.visibility ?? 1) >= MIN_VIS; };
-      const poseTracked = visOk(SH_L) && visOk(SH_R) && visOk(HIP_L) && visOk(HIP_R);
-      const restMode = !poseTracked;
+      const legsTracked = visOk(HIP_L) && visOk(HIP_R) && visOk(KN_L) && visOk(KN_R);
 
       const getLm = (i: number): NormalizedLandmark | null => {
         const lm = pw?.[i];
@@ -391,16 +415,16 @@ export function RoomViewport({
         return o.persistPose ? (lm ?? null) : null;
       };
       const RV = (i: number): THREE.Vector3 | null => {
-        if (restMode) return null;
         const lm = getLm(i);
         return lm ? new THREE.Vector3(mx * lm.x, -lm.y, -lm.z) : null;
       };
       const RVm = (i: number, j: number): THREE.Vector3 | null => {
-        if (restMode) return null;
         const a = getLm(i), b = getLm(j);
         if (!a || !b) return null;
         return new THREE.Vector3(mx * (a.x + b.x) / 2, -(a.y + b.y) / 2, -(a.z + b.z) / 2);
       };
+      // Legs only: null out when the lower body isn't tracked → rest pose.
+      const RVleg = (i: number): THREE.Vector3 | null => (legsTracked ? RV(i) : null);
       // Live direction a→b (unit), or the rest-pose fallback direction when missing.
       const dir = (a: THREE.Vector3 | null, b: THREE.Vector3 | null, fallback: THREE.Vector3): THREE.Vector3 =>
         a && b ? b.clone().sub(a).normalize() : fallback;
@@ -425,12 +449,12 @@ export function RoomViewport({
       const elR = ext(shR, dir(RV(SH_R), RV(EL_R), D_UARM_REST_R), rig.upperArmCm);
       const wrL = ext(elL, dir(RV(EL_L), RV(WR_L), D_LARM_REST_L), rig.lowerArmCm);
       const wrR = ext(elR, dir(RV(EL_R), RV(WR_R), D_LARM_REST_R), rig.lowerArmCm);
-      const knL = ext(hipL, dir(RV(HIP_L), RV(KN_L), D_DOWN), rig.upperLegCm);
-      const knR = ext(hipR, dir(RV(HIP_R), RV(KN_R), D_DOWN), rig.upperLegCm);
-      const anL = ext(knL, dir(RV(KN_L), RV(AN_L), D_DOWN), rig.lowerLegCm);
-      const anR = ext(knR, dir(RV(KN_R), RV(AN_R), D_DOWN), rig.lowerLegCm);
-      const toeL = ext(anL, dir(RV(AN_L), RV(TOE_L), D_FOOT), rig.footCm);
-      const toeR = ext(anR, dir(RV(AN_R), RV(TOE_R), D_FOOT), rig.footCm);
+      const knL = ext(hipL, dir(RVleg(HIP_L), RVleg(KN_L), D_DOWN), rig.upperLegCm);
+      const knR = ext(hipR, dir(RVleg(HIP_R), RVleg(KN_R), D_DOWN), rig.upperLegCm);
+      const anL = ext(knL, dir(RVleg(KN_L), RVleg(AN_L), D_DOWN), rig.lowerLegCm);
+      const anR = ext(knR, dir(RVleg(KN_R), RVleg(AN_R), D_DOWN), rig.lowerLegCm);
+      const toeL = ext(anL, dir(RVleg(AN_L), RVleg(TOE_L), D_FOOT), rig.footCm);
+      const toeR = ext(anR, dir(RVleg(AN_R), RVleg(TOE_R), D_FOOT), rig.footCm);
 
       const headR = Math.max(len(rig.headDiameterCm) * 0.65, 0.04);
       const jR = len(rig.jointRcm);
@@ -452,12 +476,14 @@ export function RoomViewport({
       placeSph(mJAnL, anL, jR);   placeSph(mJAnR, anR, jR);
 
       // ── filled face surface (+ contour overlay) ──────────────────────────
-      // FIXED SIZE, exactly like the body: the normalized face landmarks are
-      // converted to meters by the POSE ear width (normalized image space — the
-      // screen twin of the metric worldLandmarks) mapped onto the captured
-      // headDiameter. This is distance- AND pitch-invariant; the face is NEVER
-      // scaled by its own (foreshortening) vertical span. `faceScale` is the
-      // only size knob. The face landmarks supply shape/direction only.
+      // FIXED SIZE — every term comes from RigConfig. The rendered face width is
+      // EXACTLY headDiameterCm × FACE_W_FIT × faceScale (meters), independent of
+      // camera distance and head pose. We get there by normalizing the face by
+      // its OWN cheek-hinge width (landmarks 234↔454): a 3D span (yaw-stable)
+      // that is horizontal (pitch-stable) and ALWAYS present whenever the face is
+      // visible. (The previous pose-ear normalizer froze when the subject stepped
+      // close and the body left frame, which is what blew the face up.) faceScale
+      // is the ONLY size knob; the landmarks supply shape only.
       const face = procLm(faceProc, debugLandmarksRef.current.face, o.persistFace, o.smoothing, alpha);
       // Face-local frame (room space) — set when the face is tracked, reused to
       // anchor the eyes so they turn WITH the face (not the head sphere).
@@ -471,18 +497,12 @@ export function RoomViewport({
         for (let i = 0; i < 468; i++) { const p = face[i]; cx += p.x; cy += p.y; cz += p.z; }
         cx /= 468; cy /= 468; cz /= 468;
 
-        // metric-per-normalized scale from the pose ears; hold the last good
-        // value when they drop out (head turned), bootstrapping from the face's
-        // own width only until the pose ears are first seen.
-        const eA = poseImg?.[EAR_L], eB = poseImg?.[EAR_R];
-        if (eA && eB && (eA.visibility ?? 1) >= MIN_VIS && (eB.visibility ?? 1) >= MIN_VIS) {
-          const ne = Math.hypot(eA.x - eB.x, eA.y - eB.y);
-          if (ne > 1e-4) lastMetersPerNorm = len(rig.headDiameterCm) / ne;
-        } else if (lastMetersPerNorm <= 0) {
-          const fw = Math.hypot(face[234].x - face[454].x, face[234].y - face[454].y);
-          if (fw > 1e-4) lastMetersPerNorm = len(rig.headDiameterCm) / fw;
-        }
-        const fScale = (lastMetersPerNorm > 0 ? lastMetersPerNorm : 1) * rig.faceScale;
+        const faceW = Math.hypot(
+          face[234].x - face[454].x, face[234].y - face[454].y, face[234].z - face[454].z,
+        );
+        const fScale = faceW > 1e-4
+          ? (len(rig.headDiameterCm) * FACE_W_FIT * rig.faceScale) / faceW
+          : rig.faceScale;
 
         for (let i = 0; i < 468; i++) {
           const p = face[i];
@@ -560,6 +580,7 @@ export function RoomViewport({
         if (!lm || lm.length < 21) {
           for (const j of hr.joints) j.visible = false;
           for (const b of hr.bones) b.visible = false;
+          hr.palm.visible = false;
           return false;
         }
         // FK: fixed bone lengths (canonical fraction × per-finger multiplier ×
@@ -580,14 +601,33 @@ export function RoomViewport({
           const mul = fi >= 0 ? fingerMul[fi] : 1;
           jp[b] = jp[a].clone().addScaledVector(d, HAND_BONE_FRAC[k] * mul * handLenM);
         }
-        // Tapered cylinder per finger bone + a small sphere cap at each joint.
-        const baseFingerR = Math.max(handR * 0.20, 0.006);
+        // Finger bones: tapered cylinder per bone (radius from rig.fingerRcm) +
+        // a sphere cap at each joint. The palm-fan metacarpals are skipped — the
+        // palm is the flattened box below, so the hand looks substantial.
+        const baseFingerR = Math.max(len(rig.fingerRcm), 0.004);
         for (let k = 0; k < 20; k++) {
+          if (PALM_FAN_BONES.has(k)) { hr.bones[k].visible = false; continue; }
           const [a, b] = HAND_BONES[k];
           placeCyl(hr.bones[k], jp[a], jp[b], baseFingerR * HAND_BONE_R[k]);
         }
-        hr.bones[20].visible = false; // outer palm edge — covered by the metacarpals
-        for (let i = 0; i < 21; i++) placeSph(hr.joints[i], jp[i], baseFingerR * 0.62);
+        hr.bones[20].visible = false; // outer palm edge — part of the palm box
+        for (let i = 0; i < 21; i++) placeSph(hr.joints[i], jp[i], baseFingerR * 0.78);
+
+        // Palm: one flattened box spanning wrist → knuckle row, across the
+        // index↔pinky width. The widest, thickest part of the hand.
+        const knuckleMid = jp[5].clone().add(jp[9]).add(jp[13]).add(jp[17]).multiplyScalar(0.25);
+        _pU.subVectors(knuckleMid, jp[0]);
+        _pW.subVectors(jp[5], jp[17]);
+        const palmLen = _pU.length(), palmW = _pW.length();
+        if (palmLen > 1e-4 && palmW > 1e-4) {
+          _pU.normalize();
+          _pR.copy(_pW).addScaledVector(_pU, -_pW.dot(_pU)).normalize();
+          _pF.crossVectors(_pR, _pU).normalize();
+          _pC.addVectors(jp[0], knuckleMid).multiplyScalar(0.5);
+          placeBox(hr.palm, _pC, _pR, _pU, _pF, palmW * 1.08, palmLen * 1.05, len(rig.palmRcm) * 2);
+        } else {
+          hr.palm.visible = false;
+        }
         return true;
       };
       const lFingers = updateHand(handLeft, dataForL, wrL);
@@ -657,6 +697,7 @@ export function RoomViewport({
       for (const h of [handLeft, handRight]) {
         for (const j of h.joints) j.geometry.dispose();
         for (const b of h.bones) b.geometry.dispose();
+        h.palm.geometry.dispose();
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

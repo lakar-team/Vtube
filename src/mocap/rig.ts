@@ -33,6 +33,10 @@ export interface RigConfig {
   footRcm: number;
   jointRcm: number;
   handRcm: number;
+  /** Finger bone radius (cm) — base radius, tapered per bone toward the tips. */
+  fingerRcm: number;
+  /** Palm half-thickness (cm) — the flattened palm slab. */
+  palmRcm: number;
   /** Hand length wrist→middle-fingertip (cm) — fixes finger size from capture. */
   handLengthCm: number;
   // ── per-finger length multipliers (1 = canonical) ──
@@ -86,6 +90,8 @@ export const DEFAULT_RIG: RigConfig = {
   footRcm: 3,
   jointRcm: 4,
   handRcm: 6.5,
+  fingerRcm: 0.9,
+  palmRcm: 2.2,
   handLengthCm: 19,
   fingerThumb: 1,
   fingerIndex: 1,
