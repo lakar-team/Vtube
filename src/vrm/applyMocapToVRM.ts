@@ -1,6 +1,9 @@
 import * as THREE from "three";
 import type { VRM, VRMHumanBoneName } from "@pixiv/three-vrm";
 import {
+  FINGER_SEGMENTS,
+  type FingerSegment,
+  type HandRotations,
   type EulerRotation,
   type MocapFrame,
 } from "../mocap/types";
@@ -109,4 +112,55 @@ export function applyMocapToVRM(
       0,
     );
   }
+}
+
+/** VRM finger bone name for a side + segment, e.g. ("left","indexProximal") →
+ *  "leftIndexProximal". */
+function fingerBone(side: "left" | "right", seg: FingerSegment): VRMHumanBoneName {
+  return `${side}${seg[0].toUpperCase()}${seg.slice(1)}` as VRMHumanBoneName;
+}
+
+function applyHandBones(
+  vrm: VRM, signs: RotationSigns, side: "left" | "right", rots: HandRotations | null,
+): void {
+  if (!rots) return;
+  for (const seg of FINGER_SEGMENTS) {
+    const r = rots[seg];
+    if (r) rotateBone(vrm, signs, fingerBone(side, seg), r);
+  }
+}
+
+/**
+ * Drive the VRM's BODY bones (spine/arms/legs/hands) from the solved mocap
+ * frame — the same poseWorld-derived solve that drives the 3D-room mannequin.
+ * Each tracked limb's solved rotation is written to the matching humanoid bone,
+ * so the VRM's limb directions follow the skeleton. Call after the face apply
+ * and before vrm.update(). Untracked limbs are left in rest pose.
+ */
+export function applyBodyMocapToVRM(vrm: VRM, frame: MocapFrame): void {
+  const signs = getRotationSigns(vrm);
+
+  rotateBone(vrm, signs, "spine", frame.spine, 0.5);
+  rotateBone(vrm, signs, "chest", frame.spine, 0.5);
+
+  if (frame.armsTracked.left) {
+    rotateBone(vrm, signs, "leftUpperArm", frame.arms.leftUpperArm);
+    rotateBone(vrm, signs, "leftLowerArm", frame.arms.leftLowerArm);
+  }
+  if (frame.armsTracked.right) {
+    rotateBone(vrm, signs, "rightUpperArm", frame.arms.rightUpperArm);
+    rotateBone(vrm, signs, "rightLowerArm", frame.arms.rightLowerArm);
+  }
+
+  if (frame.legsTracked) {
+    rotateBone(vrm, signs, "leftUpperLeg", frame.legs.leftUpperLeg);
+    rotateBone(vrm, signs, "leftLowerLeg", frame.legs.leftLowerLeg);
+    rotateBone(vrm, signs, "rightUpperLeg", frame.legs.rightUpperLeg);
+    rotateBone(vrm, signs, "rightLowerLeg", frame.legs.rightLowerLeg);
+  }
+
+  if (frame.hands.leftWrist) rotateBone(vrm, signs, "leftHand", frame.hands.leftWrist);
+  if (frame.hands.rightWrist) rotateBone(vrm, signs, "rightHand", frame.hands.rightWrist);
+  applyHandBones(vrm, signs, "left", frame.hands.left);
+  applyHandBones(vrm, signs, "right", frame.hands.right);
 }

@@ -5,7 +5,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import type { DebugLandmarks, MocapFrame } from "../mocap/types";
 import type { RigConfig } from "../mocap/rig";
-import { FACE_CONTOURS, FACE_TRIANGLES_OPEN } from "./faceMeshData";
+import { FACE_CONTOURS, FACE_TRIANGLES } from "./faceMeshData";
 
 /**
  * VIEWPORT: 3D Room View (right pane) — Performance View.
@@ -96,6 +96,12 @@ const D_LARM_REST_R = new THREE.Vector3( 0.28, -0.96, 0.02).normalize();
 // the palm is rendered as one flattened box instead. Keyed by HAND_BONES index.
 const PALM_FAN_BONES = new Set<number>([4, 8, 12, 16]);
 
+// Eyelid-ring landmarks, ordered around each eye (lower lid then upper lid), used
+// to build a smooth almond eye SOCKET (triangle fan) rather than a jagged
+// triangle cutout.
+const RIGHT_EYE_RING = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246];
+const LEFT_EYE_RING = [263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466];
+
 // ─── shared temporaries ───────────────────────────────────────────────────
 const _v2 = new THREE.Vector3();
 const _q  = new THREE.Quaternion();
@@ -108,6 +114,10 @@ const _pW = new THREE.Vector3();
 const _pR = new THREE.Vector3();
 const _pF = new THREE.Vector3();
 const _pC = new THREE.Vector3();
+const _v3a = new THREE.Vector3();
+const _v3b = new THREE.Vector3();
+const _v3c = new THREE.Vector3();
+const _hq = new THREE.Quaternion();
 
 /** Unit cylinder, optionally tapered: top (distal, +Y) radius = `taper` × bottom. */
 function makeCyl(mat: THREE.Material, taper = 1): THREE.Mesh {
@@ -309,40 +319,62 @@ export function RoomViewport({
     ];
     for (const m of meshes) { m.visible = false; figure.add(m); }
 
-    // Face: one shared 468-vertex position buffer feeds a FILLED triangle
-    // surface (indexed by FACE_TRIANGLES_OPEN — the eye openings are carved out)
-    // plus a contour overlay (FACE_CONTOURS). The fill is FULLY OPAQUE and is
-    // painted AFTER the eyeballs (higher renderOrder) so it occludes them
-    // everywhere except through the carved eye holes — the eyeballs sit behind
-    // the face and show only through the eye openings.
+    // Face: one shared 468-vertex position buffer feeds a SOLID, FULLY OPAQUE
+    // triangle surface (FACE_TRIANGLES) — a true occluder. It is single-sided
+    // (FrontSide; the correct winding is chosen per-frame, since mirroring flips
+    // it) so back-facing triangles never render, and it writes depth so the
+    // contour overlay and anything behind the head are properly hidden.
     const faceVerts = new Float32Array(468 * 3);
     const facePosAttr = new THREE.BufferAttribute(faceVerts, 3);
 
     const faceFillGeom = new THREE.BufferGeometry();
     faceFillGeom.setAttribute("position", facePosAttr);
-    faceFillGeom.setIndex(new THREE.BufferAttribute(FACE_TRIANGLES_OPEN, 1));
+    faceFillGeom.setIndex(new THREE.BufferAttribute(FACE_TRIANGLES, 1));
     const matFaceFill = new THREE.MeshLambertMaterial({
-      color: 0xd9a079, side: THREE.DoubleSide,
+      color: 0xd9a079, side: THREE.FrontSide,
       transparent: false, opacity: 1, depthTest: true, depthWrite: true,
       polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
     });
     const faceFill = new THREE.Mesh(faceFillGeom, matFaceFill);
     faceFill.frustumCulled = false;
-    faceFill.renderOrder = 3;
+    faceFill.renderOrder = 2;
     faceFill.visible = false;
     figure.add(faceFill);
 
     const faceLineGeom = new THREE.BufferGeometry();
     faceLineGeom.setAttribute("position", facePosAttr);
     faceLineGeom.setIndex(new THREE.BufferAttribute(FACE_CONTOURS, 1));
+    // Contours are depth-tested (but don't write depth) so the opaque face
+    // occludes the segments on the FAR side of the head — only the near contours
+    // show through.
     const matFaceLine = new THREE.LineBasicMaterial({
-      color: 0x33586b, transparent: true, opacity: 0.7, depthTest: false,
+      color: 0x33586b, transparent: true, opacity: 0.7, depthTest: true, depthWrite: false,
     });
     const faceLine = new THREE.LineSegments(faceLineGeom, matFaceLine);
     faceLine.frustumCulled = false;
-    faceLine.renderOrder = 4;
+    faceLine.renderOrder = 3;
     faceLine.visible = false;
     figure.add(faceLine);
+
+    // Eye sockets: a smooth almond polygon (triangle fan over the eyelid ring)
+    // per eye, dark, painted on top of the face — the socket the eyeball sits in.
+    const makeSocket = () => {
+      const pos = new Float32Array(17 * 3); // centroid + 16 ring points
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+      const idx: number[] = [];
+      for (let k = 0; k < 16; k++) idx.push(0, 1 + k, 1 + ((k + 1) % 16));
+      geom.setIndex(idx);
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0x14141c, side: THREE.DoubleSide, depthTest: false, depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(geom, mat);
+      mesh.frustumCulled = false; mesh.renderOrder = 4; mesh.visible = false;
+      figure.add(mesh);
+      return { mesh, geom, pos };
+    };
+    const socketL = makeSocket();
+    const socketR = makeSocket();
 
     // Fingers: tapered cylinder per bone + small spheres at the joints (rounded
     // caps), using the skin-tinted limb material so the hand reads as one piece.
@@ -360,12 +392,8 @@ export function RoomViewport({
     const handLeft = makeHand(matL);
     const handRight = makeHand(matR);
 
-    // ── eyeballs (white) + irises (gaze-driven). Painted BEFORE the opaque face
-    //    (lower renderOrder) and NOT participating in depth (depthTest/Write
-    //    false) so the face — drawn after — occludes them everywhere except the
-    //    carved eye holes. (depthTest can't be true here: the recessed eyeball
-    //    sits inside the opaque head sphere, which would then occlude it; paint
-    //    order through the eye holes is what makes it read as "eyes behind face".)
+    // ── eyeballs (white) + irises (gaze-driven), painted on top of the dark eye
+    //    sockets (depthTest off → always read on the eye area).
     const matEye = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false, depthWrite: false });
     const matIris = new THREE.MeshBasicMaterial({ color: 0x223a5a, depthTest: false, depthWrite: false });
     const mkEyeSph = (mat: THREE.Material, ro: number) => {
@@ -374,9 +402,10 @@ export function RoomViewport({
       figure.add(m);
       return m;
     };
-    // renderOrder 1/2 — BEFORE the face fill (renderOrder 3), so the face paints over.
-    const mEyeL = mkEyeSph(matEye, 1); const mEyeR = mkEyeSph(matEye, 1);
-    const mIrisL = mkEyeSph(matIris, 2); const mIrisR = mkEyeSph(matIris, 2);
+    // renderOrder 5/6 — painted on top of the face + sockets (the eyeball sits
+    // in its dark socket), depthTest off so it always reads on the eye area.
+    const mEyeL = mkEyeSph(matEye, 5); const mEyeR = mkEyeSph(matEye, 5);
+    const mIrisL = mkEyeSph(matIris, 6); const mIrisR = mkEyeSph(matIris, 6);
 
     // ── per-stream persistence (hold-last-good) + EMA smoothing ──
     interface LmProc { held: NormalizedLandmark[] | null; sm: NormalizedLandmark[] | null; }
@@ -591,19 +620,50 @@ export function RoomViewport({
           // Eye anchor = world position of the re-centred face centroid.
           faceO.set(fx + sx, fy + sy, fz + sz);
           faceValid = true;
+
+          // Pick the FrontSide winding for THIS frame: a sample front triangle's
+          // index-order normal should point toward the viewer (≈ faceF). Mirror
+          // flips the winding, so this is recomputed each frame.
+          _v3a.set(fv(34, 0) - fv(127, 0), fv(34, 1) - fv(127, 1), fv(34, 2) - fv(127, 2));
+          _v3b.set(fv(139, 0) - fv(127, 0), fv(139, 1) - fv(127, 1), fv(139, 2) - fv(127, 2));
+          _v3c.crossVectors(_v3a, _v3b);
+          matFaceFill.side = _v3c.dot(faceF) >= 0 ? THREE.FrontSide : THREE.BackSide;
+
+          // Eye sockets — fan over the (already shifted) eyelid-ring vertices.
+          const fillSocket = (sk: { geom: THREE.BufferGeometry; pos: Float32Array }, ring: number[]) => {
+            let scx = 0, scy = 0, scz = 0;
+            for (let k = 0; k < 16; k++) {
+              const r = ring[k];
+              const x = faceVerts[r * 3], y = faceVerts[r * 3 + 1], z = faceVerts[r * 3 + 2];
+              sk.pos[(k + 1) * 3] = x; sk.pos[(k + 1) * 3 + 1] = y; sk.pos[(k + 1) * 3 + 2] = z;
+              scx += x; scy += y; scz += z;
+            }
+            sk.pos[0] = scx / 16; sk.pos[1] = scy / 16; sk.pos[2] = scz / 16;
+            sk.geom.attributes.position.needsUpdate = true;
+          };
+          fillSocket(socketL, LEFT_EYE_RING);
+          fillSocket(socketR, RIGHT_EYE_RING);
+          socketL.mesh.position.set(fx, fy, fz);
+          socketR.mesh.position.set(fx, fy, fz);
         }
         facePosAttr.needsUpdate = true;
         faceFillGeom.computeVertexNormals();
         faceFill.visible = rls.showFaceMesh;
         faceLine.visible = rls.showFaceMesh;
+        const socketsOn = faceValid && rls.showFaceMesh && rls.showEyes;
+        socketL.mesh.visible = socketsOn;
+        socketR.mesh.visible = socketsOn;
       } else {
         faceFill.visible = false;
         faceLine.visible = false;
+        socketL.mesh.visible = false;
+        socketR.mesh.visible = false;
       }
 
       // ── hands: fingers at the FK wrist, sized from the FIXED captured forearm.
+      // Closed-hand fallback ball sits just past the wrist along the forearm.
       const fist = (wr: THREE.Vector3, el: THREE.Vector3): THREE.Vector3 =>
-        wr.clone().addScaledVector(_v2.subVectors(wr, el).normalize(), 0.09);
+        wr.clone().addScaledVector(_v2.subVectors(wr, el).normalize(), 0.03);
       const handLenM = len(rig.handLengthCm);
       const handR = len(rig.handRcm);
       // Map each hand stream to the correct anatomical FK wrist using the
@@ -625,6 +685,7 @@ export function RoomViewport({
         hr: HandRig,
         lm: NormalizedLandmark[] | null,
         wrist: THREE.Vector3,
+        elbow: THREE.Vector3,
       ): boolean => {
         if (!lm || lm.length < 21) {
           for (const j of hr.joints) j.visible = false;
@@ -649,6 +710,17 @@ export function RoomViewport({
           const fi = HAND_BONE_FINGER[k];
           const mul = fi >= 0 ? fingerMul[fi] : 1;
           jp[b] = jp[a].clone().addScaledVector(d, HAND_BONE_FRAC[k] * mul * handLenM);
+        }
+        // Point the hand OUTWARD along the forearm: rotate the whole hand about
+        // the wrist so its wrist→middle-knuckle axis aligns with the forearm
+        // direction (elbow→wrist). Finger articulation (curl/spread) is preserved
+        // since we rotate rigidly. This stops the hand from hanging at an odd
+        // angle off a floating wrist ball — it now continues the arm.
+        _v3a.subVectors(jp[9], jp[0]);          // hand forward (wrist→middle base)
+        _v3b.subVectors(wrist, elbow);          // forearm forward (outward)
+        if (_v3a.lengthSq() > 1e-9 && _v3b.lengthSq() > 1e-9) {
+          _hq.setFromUnitVectors(_v3a.normalize(), _v3b.normalize());
+          for (let i = 1; i < 21; i++) jp[i].sub(jp[0]).applyQuaternion(_hq).add(jp[0]);
         }
         // Finger bones: tapered cylinder per bone (radius from rig.fingerRcm) +
         // a sphere cap at each joint. The palm-fan metacarpals are skipped — the
@@ -681,8 +753,8 @@ export function RoomViewport({
       };
       // fingerFK off → pass null so the FK fingers are hidden and a fist sphere
       // is drawn at the wrist instead.
-      const lFingers = updateHand(handLeft, rls.fingerFK ? dataForL : null, wrL);
-      const rFingers = updateHand(handRight, rls.fingerFK ? dataForR : null, wrR);
+      const lFingers = updateHand(handLeft, rls.fingerFK ? dataForL : null, wrL, elL);
+      const rFingers = updateHand(handRight, rls.fingerFK ? dataForR : null, wrR, elR);
       placeSph(mHandL, lFingers ? null : fist(wrL, elL), handR);
       placeSph(mHandR, rFingers ? null : fist(wrR, elR), handR);
 
@@ -748,6 +820,7 @@ export function RoomViewport({
       (cube.geometry as THREE.BufferGeometry).dispose();
       (cube.material as THREE.Material).dispose();
       faceFillGeom.dispose(); faceLineGeom.dispose();
+      for (const s of [socketL, socketR]) { s.geom.dispose(); (s.mesh.material as THREE.Material).dispose(); }
       for (const m of meshes) m.geometry.dispose();
       for (const h of [handLeft, handRight]) {
         for (const j of h.joints) j.geometry.dispose();

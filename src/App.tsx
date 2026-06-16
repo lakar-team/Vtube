@@ -3,6 +3,7 @@ import { WebcamView } from "./components/WebcamView";
 import { AvatarViewport, type ViewMode } from "./components/AvatarViewport";
 import { FaceMeshDebugView } from "./components/FaceMeshDebugView";
 import { RoomViewport, DEFAULT_RULES, type RuleFlags } from "./components/RoomViewport";
+import { VrmRoomViewport } from "./components/VrmRoomViewport";
 import { RigTuner } from "./components/RigTuner";
 import { RulesInspector, type RuleToggleItem } from "./components/RulesInspector";
 import { DebugHUD } from "./components/DebugHUD";
@@ -14,13 +15,14 @@ import {
 } from "./mocap/rig";
 import type { ExpressionMapping } from "./vrm/expressionMap";
 
-type DisplayMode = "avatar" | "both" | "room" | "tuner" | "rules";
+type DisplayMode = "avatar" | "both" | "room" | "tuner" | "rules" | "vrmroom";
 const DISPLAY_MODE_KEY = "vtube.displayMode";
 
 function loadDisplayMode(): DisplayMode {
   try {
     const v = localStorage.getItem(DISPLAY_MODE_KEY) as DisplayMode | null;
-    return v === "avatar" || v === "both" || v === "room" || v === "tuner" || v === "rules" ? v : "room";
+    return v === "avatar" || v === "both" || v === "room" || v === "tuner" || v === "rules" || v === "vrmroom"
+      ? v : "room";
   } catch {
     return "room";
   }
@@ -77,7 +79,7 @@ export default function App() {
   const [displayMode, setDisplayMode] = useState<DisplayMode>(loadDisplayMode);
   const [heightCm, setHeightCm] = useState<number>(loadHeightCm);
   const [roomM, setRoomM] = useState<number>(loadRoomM);
-  const [persistPose, setPersistPose] = useState(() => loadBool("vtube.persistPose", true));
+  const [persistPose, setPersistPose] = useState(() => loadBool("vtube.persistPose", false));
   const [persistHands, setPersistHands] = useState(() => loadBool("vtube.persistHands", true));
   const [persistFace, setPersistFace] = useState(() => loadBool("vtube.persistFace", true));
   const [smoothing, setSmoothing] = useState(() => loadBool("vtube.smoothing", false));
@@ -335,6 +337,7 @@ export default function App() {
               <option value="room">room (3D)</option>
               <option value="tuner">skeleton &amp; tuner</option>
               <option value="rules">rules inspector</option>
+              <option value="vrmroom">vrm (3D room)</option>
               <option value="avatar">avatar</option>
               <option value="both">both (avatar + room)</option>
             </select>
@@ -442,6 +445,17 @@ export default function App() {
               />
             </div>
             <RulesInspector toggles={ruleToggles} />
+          </section>
+        )}
+
+        {displayMode === "vrmroom" && (
+          <section className="pane">
+            <VrmRoomViewport
+              frameRef={mocap.frameRef}
+              roomM={roomM}
+              heightCm={heightCm}
+              onExpressionMap={setExpressionMap}
+            />
           </section>
         )}
       </main>
