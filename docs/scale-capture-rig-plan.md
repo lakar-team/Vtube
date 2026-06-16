@@ -58,3 +58,14 @@ by the performance view.
 
 ## Risk
 Phase 2 (FK: coordinate frames + chaining) is the highest-risk — use Opus.
+
+## Future / not-yet-scheduled
+- **Imported 3D model as the rig.** Evaluate loading an external mesh
+  (OBJ / glTF / VRM) to act as the rigged skeleton, driven by the same mocap
+  data that currently drives the primitive mannequin. The FK skeleton + RigConfig
+  proportions we build here become the retarget target: map captured bone
+  lengths/joint frames onto the imported model's humanoid bones (VRM already has
+  a normalized humanoid bone map; glTF/OBJ would need a skinned skeleton or an
+  auto-rig step). Goal: swap the cylinder/sphere mannequin for a real avatar mesh
+  while keeping the distance-invariant, fixed-proportion driving model. Raised
+  2026-06-16; no implementation yet.

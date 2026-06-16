@@ -28,8 +28,7 @@ import { FACE_CONTOURS, FACE_TRIANGLES } from "./faceMeshData";
 
 const MIN_VIS = 0.5;
 const ROOM_DEFAULT = 2.5;
-const FACE_FIT = 0.85;          // face-mesh height as a fraction of the head-sphere diameter
-const R_FINGER_JNT = 0.009;     // finger joint radius (m), not tuned
+const LIMB_TAPER = 0.72;        // distal-end radius as a fraction of the proximal end
 
 const NOSE = 0, EAR_L = 7, EAR_R = 8;
 const SH_L = 11, SH_R = 12, EL_L = 13, EL_R = 14, WR_L = 15, WR_R = 16;
@@ -66,14 +65,30 @@ const HAND_BONE_FINGER: readonly number[] = [
   4, 4, 4, 4,   // little
   -1,           // palm edge
 ];
+// Per-bone radius as a fraction of the base finger radius — thicker near the
+// palm, thinner toward the tips, so each finger tapers naturally.
+const HAND_BONE_R: readonly number[] = [
+  1.05, 0.92, 0.80, 0.66,   // thumb
+  0.98, 0.84, 0.72, 0.58,   // index
+  0.98, 0.86, 0.74, 0.60,   // middle
+  0.92, 0.80, 0.68, 0.56,   // ring
+  0.84, 0.72, 0.62, 0.52,   // little
+  0.80,                     // palm edge
+];
 
-// Default (T-pose) directions in room space, used when a live direction is missing.
+// Default directions in room space, used when a live direction is missing. These
+// describe a relaxed STANDING REST POSE (A-pose): arms hanging slightly out from
+// the body, legs straight down, head/torso upright — so a lost or partial body
+// snaps to a natural stance instead of a curled/fetal extrapolation.
 const D_UP   = new THREE.Vector3(0, 1, 0);
 const D_DOWN = new THREE.Vector3(0, -1, 0);
 const D_X    = new THREE.Vector3(1, 0, 0);
-const D_ARM_L = new THREE.Vector3(-1, 0, 0);
-const D_ARM_R = new THREE.Vector3(1, 0, 0);
 const D_FOOT = new THREE.Vector3(0, -0.3, 1).normalize();
+// Upper arms angle ~27° out from vertical, forearms hang nearer vertical.
+const D_UARM_REST_L = new THREE.Vector3(-0.45, -0.89, 0).normalize();
+const D_UARM_REST_R = new THREE.Vector3( 0.45, -0.89, 0).normalize();
+const D_LARM_REST_L = new THREE.Vector3(-0.28, -0.96, 0.02).normalize();
+const D_LARM_REST_R = new THREE.Vector3( 0.28, -0.96, 0.02).normalize();
 
 // ─── shared temporaries ───────────────────────────────────────────────────
 const _v2 = new THREE.Vector3();
@@ -83,8 +98,9 @@ const _fUp   = new THREE.Vector3();
 const _fSide = new THREE.Vector3();
 const _fN    = new THREE.Vector3();
 
-function makeCyl(mat: THREE.Material): THREE.Mesh {
-  return new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 12, 1), mat);
+/** Unit cylinder, optionally tapered: top (distal, +Y) radius = `taper` × bottom. */
+function makeCyl(mat: THREE.Material, taper = 1): THREE.Mesh {
+  return new THREE.Mesh(new THREE.CylinderGeometry(taper, 1, 1, 14, 1), mat);
 }
 function makeSph(mat: THREE.Material): THREE.Mesh {
   return new THREE.Mesh(new THREE.SphereGeometry(1, 16, 10), mat);
@@ -111,10 +127,8 @@ function placeSph(mesh: THREE.Mesh, p: THREE.Vector3 | null, radius: number): vo
 }
 
 interface HandRig {
-  joints: THREE.Mesh[];
-  bones: THREE.LineSegments;
-  bGeom: THREE.BufferGeometry;
-  bPos: Float32Array;
+  joints: THREE.Mesh[];   // 21 small spheres (rounded knuckle/tip caps)
+  bones: THREE.Mesh[];    // 21 tapered cylinders, one per HAND_BONES entry
 }
 
 /** Landmark persistence (hold-last-good) + temporal smoothing options. */
@@ -209,12 +223,13 @@ export function RoomViewport({
     const mNeck  = makeCyl(matC);
     const mTorso = makeCyl(matC);
 
-    const mUArmL = makeCyl(matL); const mUArmR = makeCyl(matR);
-    const mLArmL = makeCyl(matL); const mLArmR = makeCyl(matR);
+    // Limb cylinders taper toward the extremity for a more anatomical look.
+    const mUArmL = makeCyl(matL, LIMB_TAPER); const mUArmR = makeCyl(matR, LIMB_TAPER);
+    const mLArmL = makeCyl(matL, LIMB_TAPER); const mLArmR = makeCyl(matR, LIMB_TAPER);
     const mHandL = makeSph(matL); const mHandR = makeSph(matR);
-    const mULegL = makeCyl(matL); const mULegR = makeCyl(matR);
-    const mLLegL = makeCyl(matL); const mLLegR = makeCyl(matR);
-    const mFootL = makeCyl(matL); const mFootR = makeCyl(matR);
+    const mULegL = makeCyl(matL, LIMB_TAPER); const mULegR = makeCyl(matR, LIMB_TAPER);
+    const mLLegL = makeCyl(matL, LIMB_TAPER); const mLLegR = makeCyl(matR, LIMB_TAPER);
+    const mFootL = makeCyl(matL, LIMB_TAPER); const mFootR = makeCyl(matR, LIMB_TAPER);
 
     const mJShL = makeSph(matL); const mJShR = makeSph(matR);
     const mJElL = makeSph(matL); const mJElR = makeSph(matR);
@@ -267,22 +282,19 @@ export function RoomViewport({
     faceLine.visible = false;
     figure.add(faceLine);
 
-    const matBoneL = new THREE.LineBasicMaterial({ color: 0x88bbff });
-    const matBoneR = new THREE.LineBasicMaterial({ color: 0xff99aa });
-    const makeHand = (matBone: THREE.Material, matJoint: THREE.Material): HandRig => {
-      const joints = Array.from({ length: 21 }, () => makeSph(matJoint));
-      for (const j of joints) { j.visible = false; figure.add(j); }
-      const bGeom = new THREE.BufferGeometry();
-      const bPos = new Float32Array(HAND_BONES.length * 2 * 3);
-      bGeom.setAttribute("position", new THREE.BufferAttribute(bPos, 3));
-      const bones = new THREE.LineSegments(bGeom, matBone);
-      bones.frustumCulled = false;
-      bones.visible = false;
-      figure.add(bones);
-      return { joints, bones, bGeom, bPos };
+    // Fingers: tapered cylinder per bone + small spheres at the joints (rounded
+    // caps), using the skin-tinted limb material so the hand reads as one piece.
+    const makeHand = (mat: THREE.Material): HandRig => {
+      const joints = Array.from({ length: 21 }, () => {
+        const m = makeSph(mat); m.frustumCulled = false; m.visible = false; figure.add(m); return m;
+      });
+      const bones = Array.from({ length: HAND_BONES.length }, () => {
+        const m = makeCyl(mat, 0.7); m.frustumCulled = false; m.visible = false; figure.add(m); return m;
+      });
+      return { joints, bones };
     };
-    const handLeft = makeHand(matBoneL, matL);
-    const handRight = makeHand(matBoneR, matR);
+    const handLeft = makeHand(matL);
+    const handRight = makeHand(matR);
 
     // ── eyeballs (white) + irises (gaze-driven), on top of the face.
     const matEye = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false });
@@ -325,6 +337,9 @@ export function RoomViewport({
     };
 
     let disposed = false;
+    // Image→metric scale (m per normalized-image-unit) for the face, derived
+    // from the pose ear width and held across frames where the ears drop out.
+    let lastMetersPerNorm = 0;
 
     // Skin tone — recolour materials only when rig.skinHex changes. Head/neck/
     // torso/face use the pure skin colour; limbs keep a 75/25 blue/red tint so
@@ -361,21 +376,32 @@ export function RoomViewport({
 
       figure.position.set(0, len(rig.hipHeightCm), 0);
 
+      // Body "tracked" = the four torso anchors are confidently visible. When
+      // they aren't (body out of frame, or the subject walked up close), we stop
+      // trusting the held/extrapolated landmarks for the skeleton and fall the
+      // whole rig back to the standing rest pose below — rather than collapsing
+      // into a curled/fetal shape.
+      const visOk = (i: number) => { const l = pw?.[i]; return !!l && (l.visibility ?? 1) >= MIN_VIS; };
+      const poseTracked = visOk(SH_L) && visOk(SH_R) && visOk(HIP_L) && visOk(HIP_R);
+      const restMode = !poseTracked;
+
       const getLm = (i: number): NormalizedLandmark | null => {
         const lm = pw?.[i];
         if (lm && (lm.visibility ?? 1) >= MIN_VIS) return lm;
         return o.persistPose ? (lm ?? null) : null;
       };
       const RV = (i: number): THREE.Vector3 | null => {
+        if (restMode) return null;
         const lm = getLm(i);
         return lm ? new THREE.Vector3(mx * lm.x, -lm.y, -lm.z) : null;
       };
       const RVm = (i: number, j: number): THREE.Vector3 | null => {
+        if (restMode) return null;
         const a = getLm(i), b = getLm(j);
         if (!a || !b) return null;
         return new THREE.Vector3(mx * (a.x + b.x) / 2, -(a.y + b.y) / 2, -(a.z + b.z) / 2);
       };
-      // Live direction a→b (unit), or a default T-pose direction when missing.
+      // Live direction a→b (unit), or the rest-pose fallback direction when missing.
       const dir = (a: THREE.Vector3 | null, b: THREE.Vector3 | null, fallback: THREE.Vector3): THREE.Vector3 =>
         a && b ? b.clone().sub(a).normalize() : fallback;
       const ext = (from: THREE.Vector3, d: THREE.Vector3, cm: number): THREE.Vector3 =>
@@ -395,10 +421,10 @@ export function RoomViewport({
       const hipL = hipMid.clone().addScaledVector(hipAxis, -len(rig.hipWidthCm) / 2);
       const hipR = hipMid.clone().addScaledVector(hipAxis,  len(rig.hipWidthCm) / 2);
 
-      const elL = ext(shL, dir(RV(SH_L), RV(EL_L), D_ARM_L), rig.upperArmCm);
-      const elR = ext(shR, dir(RV(SH_R), RV(EL_R), D_ARM_R), rig.upperArmCm);
-      const wrL = ext(elL, dir(RV(EL_L), RV(WR_L), D_ARM_L), rig.lowerArmCm);
-      const wrR = ext(elR, dir(RV(EL_R), RV(WR_R), D_ARM_R), rig.lowerArmCm);
+      const elL = ext(shL, dir(RV(SH_L), RV(EL_L), D_UARM_REST_L), rig.upperArmCm);
+      const elR = ext(shR, dir(RV(SH_R), RV(EL_R), D_UARM_REST_R), rig.upperArmCm);
+      const wrL = ext(elL, dir(RV(EL_L), RV(WR_L), D_LARM_REST_L), rig.lowerArmCm);
+      const wrR = ext(elR, dir(RV(EL_R), RV(WR_R), D_LARM_REST_R), rig.lowerArmCm);
       const knL = ext(hipL, dir(RV(HIP_L), RV(KN_L), D_DOWN), rig.upperLegCm);
       const knR = ext(hipR, dir(RV(HIP_R), RV(KN_R), D_DOWN), rig.upperLegCm);
       const anL = ext(knL, dir(RV(KN_L), RV(AN_L), D_DOWN), rig.lowerLegCm);
@@ -425,53 +451,77 @@ export function RoomViewport({
       placeSph(mJKnL, knL, jR);   placeSph(mJKnR, knR, jR);
       placeSph(mJAnL, anL, jR);   placeSph(mJAnR, anR, jR);
 
-      // ── filled face surface (+ contour overlay): all 468 vertices written to
-      //    the shared buffer; sized to the FIXED head × the tunable faceScale,
-      //    offset from the head centre by the tunable face offsets.
+      // ── filled face surface (+ contour overlay) ──────────────────────────
+      // FIXED SIZE, exactly like the body: the normalized face landmarks are
+      // converted to meters by the POSE ear width (normalized image space — the
+      // screen twin of the metric worldLandmarks) mapped onto the captured
+      // headDiameter. This is distance- AND pitch-invariant; the face is NEVER
+      // scaled by its own (foreshortening) vertical span. `faceScale` is the
+      // only size knob. The face landmarks supply shape/direction only.
       const face = procLm(faceProc, debugLandmarksRef.current.face, o.persistFace, o.smoothing, alpha);
+      // Face-local frame (room space) — set when the face is tracked, reused to
+      // anchor the eyes so they turn WITH the face (not the head sphere).
+      let faceValid = false;
+      const faceR = new THREE.Vector3();
+      const faceU = new THREE.Vector3();
+      const faceF = new THREE.Vector3();
+      const faceO = new THREE.Vector3();
       if (face && face.length >= 468) {
-        let cx = 0, cy = 0, cz = 0, minY = 1, maxY = 0;
-        for (let i = 0; i < 468; i++) {
-          const p = face[i];
-          cx += p.x; cy += p.y; cz += p.z;
-          if (p.y < minY) minY = p.y;
-          if (p.y > maxY) maxY = p.y;
-        }
+        let cx = 0, cy = 0, cz = 0;
+        for (let i = 0; i < 468; i++) { const p = face[i]; cx += p.x; cy += p.y; cz += p.z; }
         cx /= 468; cy /= 468; cz /= 468;
-        const fScale = (headR * 2 * FACE_FIT * rig.faceScale) / Math.max(maxY - minY, 1e-3);
+
+        // metric-per-normalized scale from the pose ears; hold the last good
+        // value when they drop out (head turned), bootstrapping from the face's
+        // own width only until the pose ears are first seen.
+        const eA = poseImg?.[EAR_L], eB = poseImg?.[EAR_R];
+        if (eA && eB && (eA.visibility ?? 1) >= MIN_VIS && (eB.visibility ?? 1) >= MIN_VIS) {
+          const ne = Math.hypot(eA.x - eB.x, eA.y - eB.y);
+          if (ne > 1e-4) lastMetersPerNorm = len(rig.headDiameterCm) / ne;
+        } else if (lastMetersPerNorm <= 0) {
+          const fw = Math.hypot(face[234].x - face[454].x, face[234].y - face[454].y);
+          if (fw > 1e-4) lastMetersPerNorm = len(rig.headDiameterCm) / fw;
+        }
+        const fScale = (lastMetersPerNorm > 0 ? lastMetersPerNorm : 1) * rig.faceScale;
+
         for (let i = 0; i < 468; i++) {
           const p = face[i];
           faceVerts[i * 3]     = mx * (p.x - cx) * fScale;
           faceVerts[i * 3 + 1] = -(p.y - cy) * fScale;
           faceVerts[i * 3 + 2] = -(p.z - cz) * fScale;
         }
-        // Fulcrum fix: orbit the HEAD-SPHERE CENTRE, not the face plane's own
-        // centroid. Estimate the face-forward normal N (room space) from the
-        // forehead(10)/chin(152) and side(234/454) landmarks, then shift every
-        // vertex by +N·headR so the pivot point (centroid − N·headR ≈ the head
-        // centre) lands on the mesh anchor. Without this the flat face swings on
-        // its own mid-plane hinge when the head turns.
-        const fv = (i: number, o: number) => faceVerts[i * 3 + o];
-        _fUp.set(fv(10, 0) - fv(152, 0), fv(10, 1) - fv(152, 1), fv(10, 2) - fv(152, 2));
-        _fSide.set(fv(454, 0) - fv(234, 0), fv(454, 1) - fv(234, 1), fv(454, 2) - fv(234, 2));
-        _fN.crossVectors(_fSide, _fUp);
-        if (_fN.lengthSq() > 1e-9) {
-          _fN.normalize();
-          if (_fN.z < 0) _fN.multiplyScalar(-1); // point toward the viewer
-          const sx = _fN.x * headR, sy = _fN.y * headR, sz = _fN.z * headR;
-          for (let i = 0; i < 468; i++) {
-            faceVerts[i * 3]     += sx;
-            faceVerts[i * 3 + 1] += sy;
-            faceVerts[i * 3 + 2] += sz;
-          }
-        }
-        facePosAttr.needsUpdate = true;
-        faceFillGeom.computeVertexNormals();
+
         const fx = headC.x + len(rig.faceOffXcm);
         const fy = headC.y + len(rig.faceOffYcm);
         const fz = headC.z + len(rig.faceOffZcm);
         faceFill.position.set(fx, fy, fz);
         faceLine.position.set(fx, fy, fz);
+
+        // Orthonormal face frame from forehead(10)/chin(152) + sides(234/454):
+        // F forward (toward viewer), U up, R right.
+        const fv = (i: number, c: number) => faceVerts[i * 3 + c];
+        _fUp.set(fv(10, 0) - fv(152, 0), fv(10, 1) - fv(152, 1), fv(10, 2) - fv(152, 2));
+        _fSide.set(fv(454, 0) - fv(234, 0), fv(454, 1) - fv(234, 1), fv(454, 2) - fv(234, 2));
+        _fN.crossVectors(_fSide, _fUp);
+        if (_fN.lengthSq() > 1e-9 && _fUp.lengthSq() > 1e-9) {
+          faceF.copy(_fN).normalize();
+          if (faceF.z < 0) faceF.multiplyScalar(-1); // toward the viewer
+          faceU.copy(_fUp).addScaledVector(faceF, -_fUp.dot(faceF)).normalize();
+          faceR.crossVectors(faceU, faceF).normalize();
+          if (faceR.dot(_fSide) < 0) faceR.multiplyScalar(-1);
+          // Fulcrum: shift every vertex by +F·headR so the rotation pivot (the
+          // head-sphere centre) lands on the mesh anchor, instead of the flat
+          // face swinging on its own mid-plane hinge when the head turns.
+          const sx = faceF.x * headR, sy = faceF.y * headR, sz = faceF.z * headR;
+          for (let i = 0; i < 468; i++) {
+            faceVerts[i * 3] += sx; faceVerts[i * 3 + 1] += sy; faceVerts[i * 3 + 2] += sz;
+          }
+          // Eye anchor = world position of the re-centred face centroid.
+          faceO.set(fx + sx, fy + sy, fz + sz);
+          faceValid = true;
+        }
+        facePosAttr.needsUpdate = true;
+        faceFillGeom.computeVertexNormals();
         faceFill.visible = true;
         faceLine.visible = true;
       } else {
@@ -509,7 +559,7 @@ export function RoomViewport({
       ): boolean => {
         if (!lm || lm.length < 21) {
           for (const j of hr.joints) j.visible = false;
-          hr.bones.visible = false;
+          for (const b of hr.bones) b.visible = false;
           return false;
         }
         // FK: fixed bone lengths (canonical fraction × per-finger multiplier ×
@@ -530,15 +580,14 @@ export function RoomViewport({
           const mul = fi >= 0 ? fingerMul[fi] : 1;
           jp[b] = jp[a].clone().addScaledVector(d, HAND_BONE_FRAC[k] * mul * handLenM);
         }
-        for (let i = 0; i < 21; i++) placeSph(hr.joints[i], jp[i], R_FINGER_JNT);
-        for (let k = 0; k < HAND_BONES.length; k++) {
+        // Tapered cylinder per finger bone + a small sphere cap at each joint.
+        const baseFingerR = Math.max(handR * 0.20, 0.006);
+        for (let k = 0; k < 20; k++) {
           const [a, b] = HAND_BONES[k];
-          const pa = jp[a], pb = jp[b];
-          hr.bPos[k * 6]     = pa.x; hr.bPos[k * 6 + 1] = pa.y; hr.bPos[k * 6 + 2] = pa.z;
-          hr.bPos[k * 6 + 3] = pb.x; hr.bPos[k * 6 + 4] = pb.y; hr.bPos[k * 6 + 5] = pb.z;
+          placeCyl(hr.bones[k], jp[a], jp[b], baseFingerR * HAND_BONE_R[k]);
         }
-        hr.bGeom.attributes.position.needsUpdate = true;
-        hr.bones.visible = true;
+        hr.bones[20].visible = false; // outer palm edge — covered by the metacarpals
+        for (let i = 0; i < 21; i++) placeSph(hr.joints[i], jp[i], baseFingerR * 0.62);
         return true;
       };
       const lFingers = updateHand(handLeft, dataForL, wrL);
@@ -546,18 +595,30 @@ export function RoomViewport({
       placeSph(mHandL, lFingers ? null : fist(wrL, elL), handR);
       placeSph(mHandR, rFingers ? null : fist(wrR, elR), handR);
 
-      // ── eyeballs + gaze (pupil x/y from the smoothed mocap frame, -1..1)
+      // ── eyeballs + gaze (pupil x/y from the smoothed mocap frame, -1..1).
+      //    Eyes live in FACE-LOCAL space (faceO + R/U/F basis from the face
+      //    landmarks) so they sit in the face mesh and turn with it. eyeX/Y/Z
+      //    are face-local offsets. When no face is tracked, fall back to a
+      //    head-local frame so the eyes still rest on the head sphere.
       const pupil = frameRef.current?.pupil;
       const eyeRm = len(rig.eyeRcm);
       const eyeXm = len(rig.eyeXcm), eyeYm = len(rig.eyeYcm), eyeZm = len(rig.eyeZcm);
       const gx = (pupil ? pupil.x : 0) * eyeRm * 0.55;
       const gy = (pupil ? pupil.y : 0) * eyeRm * 0.55;
+      if (!faceValid) {
+        faceO.copy(headC);
+        faceR.set(mx, 0, 0); faceU.set(0, 1, 0); faceF.set(0, 0, 1);
+      }
       const placeEye = (eye: THREE.Mesh, iris: THREE.Mesh, sign: number) => {
-        const ex = headC.x + mx * sign * eyeXm;
-        const ey = headC.y + eyeYm;
-        const ez = headC.z + eyeZm;
-        eye.position.set(ex, ey, ez); eye.scale.setScalar(eyeRm); eye.visible = true;
-        iris.position.set(ex + mx * gx, ey + gy, ez + eyeRm * 0.82);
+        const ep = faceO.clone()
+          .addScaledVector(faceR, sign * eyeXm)
+          .addScaledVector(faceU, eyeYm)
+          .addScaledVector(faceF, eyeZm);
+        eye.position.copy(ep); eye.scale.setScalar(eyeRm); eye.visible = true;
+        iris.position.copy(ep)
+          .addScaledVector(faceR, gx)
+          .addScaledVector(faceU, gy)
+          .addScaledVector(faceF, eyeRm * 0.82);
         iris.scale.setScalar(eyeRm * 0.45); iris.visible = true;
       };
       placeEye(mEyeL, mIrisL, -1);
@@ -585,7 +646,6 @@ export function RoomViewport({
       renderer.domElement.remove();
       matL.dispose(); matR.dispose(); matC.dispose();
       matFaceFill.dispose(); matFaceLine.dispose();
-      matBoneL.dispose(); matBoneR.dispose();
       matEye.dispose(); matIris.dispose();
       mEyeL.geometry.dispose(); mEyeR.geometry.dispose();
       mIrisL.geometry.dispose(); mIrisR.geometry.dispose();
@@ -593,10 +653,11 @@ export function RoomViewport({
       (cube.geometry as THREE.BufferGeometry).dispose();
       (cube.material as THREE.Material).dispose();
       faceFillGeom.dispose(); faceLineGeom.dispose();
-      handLeft.bGeom.dispose(); handRight.bGeom.dispose();
       for (const m of meshes) m.geometry.dispose();
-      for (const j of handLeft.joints) j.geometry.dispose();
-      for (const j of handRight.joints) j.geometry.dispose();
+      for (const h of [handLeft, handRight]) {
+        for (const j of h.joints) j.geometry.dispose();
+        for (const b of h.bones) b.geometry.dispose();
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debugLandmarksRef]);

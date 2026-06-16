@@ -160,53 +160,63 @@ export default function App() {
     });
   };
 
-  // Snap eye position into the detected face sockets. Mirrors the RoomViewport
-  // face transform (centroid-relative → metric, faceScale, face offset, +N·headR
-  // fulcrum shift) so the eyeballs land where the rendered face sockets are.
+  // Snap eyes into the detected sockets, written as FACE-LOCAL offsets (matching
+  // RoomViewport: eyes live in the face frame, not head-local). Builds the same
+  // metric face transform + R/U/F basis the viewport uses, projects each eye
+  // centre onto that basis. The fulcrum shift is common to anchor and eyes, so it
+  // cancels in face-local space — eyeX/Y/Z are pure offsets from the face centre.
   const snapEyesToSockets = () => {
-    const face = mocap.debugLandmarksRef.current.face;
+    const lms = mocap.debugLandmarksRef.current;
+    const face = lms.face;
     if (!face || face.length < 468) {
       console.warn("[snap eyes] no face landmarks — face the camera and retry");
       return;
     }
     const rig = rigConfigRef.current;
     const mx = mirror ? -1 : 1;
-    let cx = 0, cy = 0, cz = 0, minY = 1, maxY = 0;
-    for (let i = 0; i < 468; i++) {
-      const p = face[i];
-      cx += p.x; cy += p.y; cz += p.z;
-      if (p.y < minY) minY = p.y;
-      if (p.y > maxY) maxY = p.y;
-    }
+    let cx = 0, cy = 0, cz = 0;
+    for (let i = 0; i < 468; i++) { const p = face[i]; cx += p.x; cy += p.y; cz += p.z; }
     cx /= 468; cy /= 468; cz /= 468;
-    const headR = Math.max((rig.headDiameterCm / 100) * 0.65, 0.04);
-    const FACE_FIT = 0.85;
-    const fScale = (headR * 2 * FACE_FIT * rig.faceScale) / Math.max(maxY - minY, 1e-3);
-    // Face-forward normal (room space) from forehead(10)/chin(152) + sides(234/454).
-    const rvx = (i: number) => mx * (face[i].x - cx);
-    const rvy = (i: number) => -(face[i].y - cy);
-    const rvz = (i: number) => -(face[i].z - cz);
-    const ux = rvx(10) - rvx(152), uy = rvy(10) - rvy(152), uz = rvz(10) - rvz(152);
-    const sx = rvx(454) - rvx(234), sy = rvy(454) - rvy(234), sz = rvz(454) - rvz(234);
-    let nx = sy * uz - sz * uy, ny = sz * ux - sx * uz, nz = sx * uy - sy * ux;
-    const nl = Math.hypot(nx, ny, nz) || 1;
-    nx /= nl; ny /= nl; nz /= nl;
-    if (nz < 0) { nx = -nx; ny = -ny; nz = -nz; }
-    // Offset of a landmark from the head centre (m).
-    const off = (i: number) => ({
-      x: rig.faceOffXcm / 100 + mx * (face[i].x - cx) * fScale + nx * headR,
-      y: rig.faceOffYcm / 100 + -(face[i].y - cy) * fScale + ny * headR,
-      z: rig.faceOffZcm / 100 + -(face[i].z - cz) * fScale + nz * headR,
+    // metric-per-normalized from the pose ears (fallback: face width).
+    const headM = rig.headDiameterCm / 100;
+    const eA = lms.pose?.[7], eB = lms.pose?.[8];
+    let mpn = 0;
+    if (eA && eB && (eA.visibility ?? 1) >= 0.5 && (eB.visibility ?? 1) >= 0.5) {
+      const ne = Math.hypot(eA.x - eB.x, eA.y - eB.y);
+      if (ne > 1e-4) mpn = headM / ne;
+    }
+    if (mpn <= 0) {
+      const fw = Math.hypot(face[234].x - face[454].x, face[234].y - face[454].y);
+      mpn = fw > 1e-4 ? headM / fw : 1;
+    }
+    const fScale = mpn * rig.faceScale;
+    type V = { x: number; y: number; z: number };
+    const rv = (i: number): V => ({
+      x: mx * (face[i].x - cx) * fScale,
+      y: -(face[i].y - cy) * fScale,
+      z: -(face[i].z - cz) * fScale,
     });
-    const eye = (a: number, b: number) => {
-      const A = off(a), B = off(b);
-      return { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2, z: (A.z + B.z) / 2 };
+    const sub = (a: V, b: V): V => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z });
+    const dot = (a: V, b: V) => a.x * b.x + a.y * b.y + a.z * b.z;
+    const norm = (a: V): V => { const l = Math.hypot(a.x, a.y, a.z) || 1; return { x: a.x / l, y: a.y / l, z: a.z / l }; };
+    const cross = (a: V, b: V): V => ({ x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x });
+    const up = sub(rv(10), rv(152));
+    const side = sub(rv(454), rv(234));
+    let F = norm(cross(side, up));
+    if (F.z < 0) F = { x: -F.x, y: -F.y, z: -F.z };
+    const U = norm(sub(up, { x: F.x * dot(up, F), y: F.y * dot(up, F), z: F.z * dot(up, F) }));
+    let R = norm(cross(U, F));
+    if (dot(R, side) < 0) R = { x: -R.x, y: -R.y, z: -R.z };
+    const eyeLocal = (a: number, b: number) => {
+      const ea = rv(a), eb = rv(b);
+      const c: V = { x: (ea.x + eb.x) / 2, y: (ea.y + eb.y) / 2, z: (ea.z + eb.z) / 2 };
+      return { x: dot(c, R), y: dot(c, U), z: dot(c, F) };
     };
-    const L = eye(362, 263); // left eye inner/outer corners
-    const R = eye(33, 133);  // right eye outer/inner corners
-    const eyeXcm = (Math.abs(L.x - R.x) / 2) * 100;
-    const eyeYcm = ((L.y + R.y) / 2) * 100;
-    const eyeZcm = ((L.z + R.z) / 2) * 100;
+    const L = eyeLocal(362, 263); // left eye inner/outer corners
+    const Re = eyeLocal(33, 133); // right eye outer/inner corners
+    const eyeXcm = (Math.abs(L.x - Re.x) / 2) * 100;
+    const eyeYcm = ((L.y + Re.y) / 2) * 100;
+    const eyeZcm = ((L.z + Re.z) / 2) * 100;
     setRigConfig((prev) => {
       const next = { ...prev, eyeXcm, eyeYcm, eyeZcm };
       saveRigConfig(next);
