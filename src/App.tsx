@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { WebcamView } from "./components/WebcamView";
 import { AvatarViewport, type ViewMode } from "./components/AvatarViewport";
 import { FaceMeshDebugView } from "./components/FaceMeshDebugView";
-import { RoomViewport } from "./components/RoomViewport";
+import { RoomViewport, DEFAULT_RULES, type RuleFlags } from "./components/RoomViewport";
 import { RigTuner } from "./components/RigTuner";
+import { RulesInspector, type RuleToggleItem } from "./components/RulesInspector";
 import { DebugHUD } from "./components/DebugHUD";
 import { useWebcam } from "./hooks/useWebcam";
 import { useMocap } from "./mocap/useMocap";
@@ -13,15 +14,25 @@ import {
 } from "./mocap/rig";
 import type { ExpressionMapping } from "./vrm/expressionMap";
 
-type DisplayMode = "avatar" | "both" | "room" | "tuner";
+type DisplayMode = "avatar" | "both" | "room" | "tuner" | "rules";
 const DISPLAY_MODE_KEY = "vtube.displayMode";
 
 function loadDisplayMode(): DisplayMode {
   try {
     const v = localStorage.getItem(DISPLAY_MODE_KEY) as DisplayMode | null;
-    return v === "avatar" || v === "both" || v === "room" || v === "tuner" ? v : "room";
+    return v === "avatar" || v === "both" || v === "room" || v === "tuner" || v === "rules" ? v : "room";
   } catch {
     return "room";
+  }
+}
+
+const RULES_KEY = "vtube.rules";
+function loadRules(): RuleFlags {
+  try {
+    const raw = localStorage.getItem(RULES_KEY);
+    return raw ? { ...DEFAULT_RULES, ...(JSON.parse(raw) as Partial<RuleFlags>) } : { ...DEFAULT_RULES };
+  } catch {
+    return { ...DEFAULT_RULES };
   }
 }
 
@@ -74,6 +85,14 @@ export default function App() {
   const [rigConfig, setRigConfig] = useState<RigConfig>(loadRigConfig);
   const rigConfigRef = useRef(rigConfig);
   rigConfigRef.current = rigConfig;
+  const [rules, setRules] = useState<RuleFlags>(loadRules);
+  const setRule = (k: keyof RuleFlags, v: boolean) => {
+    setRules((prev) => {
+      const next = { ...prev, [k]: v };
+      try { localStorage.setItem(RULES_KEY, JSON.stringify(next)); } catch { /* privacy mode */ }
+      return next;
+    });
+  };
   const [countdown, setCountdown] = useState<number | null>(null);
   const captureTimerRef = useRef<number | null>(null);
   const [expressionMap, setExpressionMap] = useState<ExpressionMapping | null>(null);
@@ -110,6 +129,22 @@ export default function App() {
     try { localStorage.setItem("vtube.smoothAmount", String(v)); } catch { /* privacy mode */ }
   };
   const lmOpts = { persistPose, persistHands, persistFace, smoothing, smoothAmount };
+
+  // Rules Inspector: persistence/smoothing reuse the existing header state; the
+  // behavioural rules drive RoomViewport via the `rules` flags.
+  const ruleToggles: RuleToggleItem[] = [
+    { key: "posePersistence", label: "pose persistence", value: persistPose, onToggle: (v) => setBoolPersisted("vtube.persistPose", setPersistPose, v) },
+    { key: "handPersistence", label: "hand persistence", value: persistHands, onToggle: (v) => setBoolPersisted("vtube.persistHands", setPersistHands, v) },
+    { key: "facePersistence", label: "face persistence", value: persistFace, onToggle: (v) => setBoolPersisted("vtube.persistFace", setPersistFace, v) },
+    { key: "smoothing", label: "temporal smoothing", value: smoothing, onToggle: (v) => setBoolPersisted("vtube.smoothing", setSmoothing, v) },
+    { key: "legsRestOnLoss", label: "A-pose legs on body loss", value: rules.legsRestOnLoss, onToggle: (v) => setRule("legsRestOnLoss", v) },
+    { key: "faceFulcrum", label: "face fulcrum correction", value: rules.faceFulcrum, onToggle: (v) => setRule("faceFulcrum", v) },
+    { key: "fingerFK", label: "finger forward kinematics", value: rules.fingerFK, onToggle: (v) => setRule("fingerFK", v) },
+    { key: "faceLocalEyes", label: "face-local eye anchoring", value: rules.faceLocalEyes, onToggle: (v) => setRule("faceLocalEyes", v) },
+    { key: "cheekHingeNorm", label: "face cheek-hinge normalization", value: rules.cheekHingeNorm, onToggle: (v) => setRule("cheekHingeNorm", v) },
+    { key: "showFaceMesh", label: "face surface mesh", value: rules.showFaceMesh, onToggle: (v) => setRule("showFaceMesh", v) },
+    { key: "showEyes", label: "eyeballs", value: rules.showEyes, onToggle: (v) => setRule("showEyes", v) },
+  ];
 
   // ── one-time scale capture: 5s countdown, then snapshot proportions once.
   const startCapture = () => {
@@ -299,6 +334,7 @@ export default function App() {
             >
               <option value="room">room (3D)</option>
               <option value="tuner">skeleton &amp; tuner</option>
+              <option value="rules">rules inspector</option>
               <option value="avatar">avatar</option>
               <option value="both">both (avatar + room)</option>
             </select>
@@ -364,6 +400,7 @@ export default function App() {
               mirror={mirror}
               roomM={roomM}
               lmOpts={lmOpts}
+              rules={rules}
             />
           </section>
         )}
@@ -378,6 +415,7 @@ export default function App() {
                 mirror={mirror}
                 roomM={roomM}
                 lmOpts={lmOpts}
+                rules={rules}
               />
             </div>
             <RigTuner
@@ -387,6 +425,23 @@ export default function App() {
               onSnapEyes={snapEyesToSockets}
               onSkinChange={changeSkin}
             />
+          </section>
+        )}
+
+        {displayMode === "rules" && (
+          <section className="pane pane-tuner">
+            <div className="tuner-viewport">
+              <RoomViewport
+                debugLandmarksRef={mocap.debugLandmarksRef}
+                frameRef={mocap.frameRef}
+                rigConfig={rigConfig}
+                mirror={mirror}
+                roomM={roomM}
+                lmOpts={lmOpts}
+                rules={rules}
+              />
+            </div>
+            <RulesInspector toggles={ruleToggles} />
           </section>
         )}
       </main>

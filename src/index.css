@@ -405,6 +405,27 @@ body {
   margin: 6px 0 2px;
 }
 
+.rule-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  margin: 4px 0;
+}
+.rule-row input[type="checkbox"] {
+  cursor: pointer;
+}
+.rule-state {
+  width: 22px;
+  text-align: right;
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+}
+.rule-state.on { color: #4ad08a; }
+.rule-state.off { color: #888; }
+
 .tuner-val {
   text-align: right;
   font-family: ui-monospace, monospace;

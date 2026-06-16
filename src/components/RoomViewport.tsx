@@ -5,7 +5,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import type { DebugLandmarks, MocapFrame } from "../mocap/types";
 import type { RigConfig } from "../mocap/rig";
-import { FACE_CONTOURS, FACE_TRIANGLES } from "./faceMeshData";
+import { FACE_CONTOURS, FACE_TRIANGLES_OPEN } from "./faceMeshData";
 
 /**
  * VIEWPORT: 3D Room View (right pane) — Performance View.
@@ -30,6 +30,7 @@ const MIN_VIS = 0.5;
 const ROOM_DEFAULT = 2.5;
 const LIMB_TAPER = 0.72;        // distal-end radius as a fraction of the proximal end
 const FACE_W_FIT = 0.92;        // rendered face width as a fraction of the head diameter (at faceScale 1)
+const FALLBACK_FACE_W = 0.13;   // constant cheek-hinge width used when cheekHingeNorm is OFF
 
 const NOSE = 0, EAR_L = 7, EAR_R = 8;
 const SH_L = 11, SH_R = 12, EL_L = 13, EL_R = 14, WR_L = 15, WR_R = 16;
@@ -166,6 +167,37 @@ export interface LandmarkOptions {
   smoothAmount: number;
 }
 
+/**
+ * Behavioural processing rules — every meaningful modifier the render loop can
+ * apply, exposed as live toggles by the Rules Inspector view. All default true.
+ */
+export interface RuleFlags {
+  /** Legs snap to a straight-down rest pose when the lower body isn't tracked. */
+  legsRestOnLoss: boolean;
+  /** Face mesh orbits the head-sphere centre (fulcrum shift), not its own plane. */
+  faceFulcrum: boolean;
+  /** Forward-kinematics fingers (off → just a fist sphere at the wrist). */
+  fingerFK: boolean;
+  /** Eyes anchored in the face-local frame (off → head-local frame). */
+  faceLocalEyes: boolean;
+  /** Face size from the cheek-hinge width (off → distance-variant fixed guess). */
+  cheekHingeNorm: boolean;
+  /** Draw the face surface mesh. */
+  showFaceMesh: boolean;
+  /** Draw the eyeballs + irises. */
+  showEyes: boolean;
+}
+
+export const DEFAULT_RULES: RuleFlags = {
+  legsRestOnLoss: true,
+  faceFulcrum: true,
+  fingerFK: true,
+  faceLocalEyes: true,
+  cheekHingeNorm: true,
+  showFaceMesh: true,
+  showEyes: true,
+};
+
 export interface RoomViewportProps {
   debugLandmarksRef: MutableRefObject<DebugLandmarks>;
   /** Smoothed mocap frame — read for eye gaze (pupil). */
@@ -177,6 +209,8 @@ export interface RoomViewportProps {
   roomM: number;
   /** Per-stream persistence + smoothing. */
   lmOpts: LandmarkOptions;
+  /** Behavioural processing rules (Rules Inspector toggles). */
+  rules?: RuleFlags;
 }
 
 export function RoomViewport({
@@ -186,6 +220,7 @@ export function RoomViewport({
   mirror,
   roomM,
   lmOpts,
+  rules = DEFAULT_RULES,
 }: RoomViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mirrorRef = useRef(mirror);
@@ -196,6 +231,8 @@ export function RoomViewport({
   rigRef.current = rigConfig;
   const lmOptsRef = useRef(lmOpts);
   lmOptsRef.current = lmOpts;
+  const rulesRef = useRef(rules);
+  rulesRef.current = rules;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -273,25 +310,25 @@ export function RoomViewport({
     for (const m of meshes) { m.visible = false; figure.add(m); }
 
     // Face: one shared 468-vertex position buffer feeds a FILLED triangle
-    // surface (indexed by FACE_TRIANGLES) plus a contour overlay (indexed by
-    // FACE_CONTOURS) for feature definition. depthTest:false so the face always
-    // reads on the front of the head sphere.
+    // surface (indexed by FACE_TRIANGLES_OPEN — the eye openings are carved out)
+    // plus a contour overlay (FACE_CONTOURS). The fill is FULLY OPAQUE and is
+    // painted AFTER the eyeballs (higher renderOrder) so it occludes them
+    // everywhere except through the carved eye holes — the eyeballs sit behind
+    // the face and show only through the eye openings.
     const faceVerts = new Float32Array(468 * 3);
     const facePosAttr = new THREE.BufferAttribute(faceVerts, 3);
 
     const faceFillGeom = new THREE.BufferGeometry();
     faceFillGeom.setAttribute("position", facePosAttr);
-    faceFillGeom.setIndex(new THREE.BufferAttribute(FACE_TRIANGLES, 1));
-    // Filled surface writes depth normally (so it occludes what's behind it);
-    // polygonOffset pushes it a hair back so the contour overlay sits on top
-    // without z-fighting.
+    faceFillGeom.setIndex(new THREE.BufferAttribute(FACE_TRIANGLES_OPEN, 1));
     const matFaceFill = new THREE.MeshLambertMaterial({
       color: 0xd9a079, side: THREE.DoubleSide,
+      transparent: false, opacity: 1, depthTest: true, depthWrite: true,
       polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
     });
     const faceFill = new THREE.Mesh(faceFillGeom, matFaceFill);
     faceFill.frustumCulled = false;
-    faceFill.renderOrder = 2;
+    faceFill.renderOrder = 3;
     faceFill.visible = false;
     figure.add(faceFill);
 
@@ -303,7 +340,7 @@ export function RoomViewport({
     });
     const faceLine = new THREE.LineSegments(faceLineGeom, matFaceLine);
     faceLine.frustumCulled = false;
-    faceLine.renderOrder = 3;
+    faceLine.renderOrder = 4;
     faceLine.visible = false;
     figure.add(faceLine);
 
@@ -323,17 +360,23 @@ export function RoomViewport({
     const handLeft = makeHand(matL);
     const handRight = makeHand(matR);
 
-    // ── eyeballs (white) + irises (gaze-driven), on top of the face.
-    const matEye = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false });
-    const matIris = new THREE.MeshBasicMaterial({ color: 0x223a5a, depthTest: false });
+    // ── eyeballs (white) + irises (gaze-driven). Painted BEFORE the opaque face
+    //    (lower renderOrder) and NOT participating in depth (depthTest/Write
+    //    false) so the face — drawn after — occludes them everywhere except the
+    //    carved eye holes. (depthTest can't be true here: the recessed eyeball
+    //    sits inside the opaque head sphere, which would then occlude it; paint
+    //    order through the eye holes is what makes it read as "eyes behind face".)
+    const matEye = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false, depthWrite: false });
+    const matIris = new THREE.MeshBasicMaterial({ color: 0x223a5a, depthTest: false, depthWrite: false });
     const mkEyeSph = (mat: THREE.Material, ro: number) => {
       const m = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), mat);
       m.frustumCulled = false; m.visible = false; m.renderOrder = ro;
       figure.add(m);
       return m;
     };
-    const mEyeL = mkEyeSph(matEye, 4); const mEyeR = mkEyeSph(matEye, 4);
-    const mIrisL = mkEyeSph(matIris, 5); const mIrisR = mkEyeSph(matIris, 5);
+    // renderOrder 1/2 — BEFORE the face fill (renderOrder 3), so the face paints over.
+    const mEyeL = mkEyeSph(matEye, 1); const mEyeR = mkEyeSph(matEye, 1);
+    const mIrisL = mkEyeSph(matIris, 2); const mIrisR = mkEyeSph(matIris, 2);
 
     // ── per-stream persistence (hold-last-good) + EMA smoothing ──
     interface LmProc { held: NormalizedLandmark[] | null; sm: NormalizedLandmark[] | null; }
@@ -390,6 +433,7 @@ export function RoomViewport({
       controls.update();
 
       const o = lmOptsRef.current;
+      const rls = rulesRef.current;
       const alpha = o.smoothing ? Math.max(0.04, 1 - o.smoothAmount) : 1;
       const pw = procLm(poseProc, debugLandmarksRef.current.poseWorld, o.persistPose, o.smoothing, alpha);
       const rig = rigRef.current;
@@ -422,8 +466,11 @@ export function RoomViewport({
         if (!a || !b) return null;
         return new THREE.Vector3(mx * (a.x + b.x) / 2, -(a.y + b.y) / 2, -(a.z + b.z) / 2);
       };
-      // Legs only: null out when the lower body isn't tracked → rest pose.
-      const RVleg = (i: number): THREE.Vector3 | null => (legsTracked ? RV(i) : null);
+      // Legs only: null out when the lower body isn't tracked → rest pose. The
+      // legsRestOnLoss rule can disable this (legs then follow held landmarks,
+      // which may curl/fetal — useful to see the rule's effect).
+      const RVleg = (i: number): THREE.Vector3 | null =>
+        (rls.legsRestOnLoss && !legsTracked ? null : RV(i));
       // Live direction a→b (unit), or the rest-pose fallback direction when missing.
       const dir = (a: THREE.Vector3 | null, b: THREE.Vector3 | null, fallback: THREE.Vector3): THREE.Vector3 =>
         a && b ? b.clone().sub(a).normalize() : fallback;
@@ -496,12 +543,16 @@ export function RoomViewport({
         for (let i = 0; i < 468; i++) { const p = face[i]; cx += p.x; cy += p.y; cz += p.z; }
         cx /= 468; cy /= 468; cz /= 468;
 
+        const faceTarget = len(rig.headDiameterCm) * FACE_W_FIT * rig.faceScale;
         const faceW = Math.hypot(
           face[234].x - face[454].x, face[234].y - face[454].y, face[234].z - face[454].z,
         );
-        const fScale = faceW > 1e-4
-          ? (len(rig.headDiameterCm) * FACE_W_FIT * rig.faceScale) / faceW
-          : rig.faceScale;
+        // cheekHingeNorm on → fixed size (normalize by the live cheek-hinge width).
+        // off → a constant guess width, so the face scales with camera distance
+        // (demonstrates why the normalization matters).
+        const fScale = rls.cheekHingeNorm
+          ? (faceW > 1e-4 ? faceTarget / faceW : rig.faceScale)
+          : faceTarget / FALLBACK_FACE_W;
 
         for (let i = 0; i < 468; i++) {
           const p = face[i];
@@ -530,8 +581,10 @@ export function RoomViewport({
           if (faceR.dot(_fSide) < 0) faceR.multiplyScalar(-1);
           // Fulcrum: shift every vertex by +F·headR so the rotation pivot (the
           // head-sphere centre) lands on the mesh anchor, instead of the flat
-          // face swinging on its own mid-plane hinge when the head turns.
-          const sx = faceF.x * headR, sy = faceF.y * headR, sz = faceF.z * headR;
+          // face swinging on its own mid-plane hinge when the head turns. The
+          // faceFulcrum rule can disable the shift.
+          const shift = rls.faceFulcrum ? headR : 0;
+          const sx = faceF.x * shift, sy = faceF.y * shift, sz = faceF.z * shift;
           for (let i = 0; i < 468; i++) {
             faceVerts[i * 3] += sx; faceVerts[i * 3 + 1] += sy; faceVerts[i * 3 + 2] += sz;
           }
@@ -541,8 +594,8 @@ export function RoomViewport({
         }
         facePosAttr.needsUpdate = true;
         faceFillGeom.computeVertexNormals();
-        faceFill.visible = true;
-        faceLine.visible = true;
+        faceFill.visible = rls.showFaceMesh;
+        faceLine.visible = rls.showFaceMesh;
       } else {
         faceFill.visible = false;
         faceLine.visible = false;
@@ -553,15 +606,21 @@ export function RoomViewport({
         wr.clone().addScaledVector(_v2.subVectors(wr, el).normalize(), 0.09);
       const handLenM = len(rig.handLengthCm);
       const handR = len(rig.handRcm);
-      // The leftHand/rightHand streams are ALREADY anatomically labelled (and
-      // mirror-corrected) upstream in solveMocapFrame, so map each straight onto
-      // the matching FK wrist. The previous re-classification compared against the
-      // live pose wrists (poseImg); when the body left frame that gate returned
-      // null and dropped the held hands — directly contradicting hand persistence.
-      // Direct mapping keeps a held/raised hand visible whether or not the body is
-      // tracked (procLm already holds the last-good finger landmarks).
-      const dataForL = procLm(handLProc, debugLandmarksRef.current.leftHand, o.persistHands, o.smoothing, alpha);
-      const dataForR = procLm(handRProc, debugLandmarksRef.current.rightHand, o.persistHands, o.smoothing, alpha);
+      // Map each hand stream to the correct anatomical FK wrist using the
+      // chirality the adapter already resolved (handedness + geometric anchoring),
+      // accounting for the webcam mirror — NOT the live pose wrists, so a held or
+      // raised hand stays visible when the body leaves frame (hand persistence).
+      //
+      // solveMocapFrame keys debug.leftHand/rightHand by AVATAR side: in mirror
+      // mode debug.leftHand = the subject's RIGHT hand (and it swaps both streams
+      // when mirror is off). wrL/wrR here are the anatomical left/right wrists
+      // (pose landmarks 15/16). So the stream→wrist pairing flips with mirror:
+      //   mirror on  → rightHand stream feeds wrL, leftHand feeds wrR
+      //   mirror off → leftHand  stream feeds wrL, rightHand feeds wrR
+      const lStream = procLm(handLProc, debugLandmarksRef.current.leftHand, o.persistHands, o.smoothing, alpha);
+      const rStream = procLm(handRProc, debugLandmarksRef.current.rightHand, o.persistHands, o.smoothing, alpha);
+      const dataForL = mirrorRef.current ? rStream : lStream;
+      const dataForR = mirrorRef.current ? lStream : rStream;
       const updateHand = (
         hr: HandRig,
         lm: NormalizedLandmark[] | null,
@@ -620,8 +679,10 @@ export function RoomViewport({
         }
         return true;
       };
-      const lFingers = updateHand(handLeft, dataForL, wrL);
-      const rFingers = updateHand(handRight, dataForR, wrR);
+      // fingerFK off → pass null so the FK fingers are hidden and a fist sphere
+      // is drawn at the wrist instead.
+      const lFingers = updateHand(handLeft, rls.fingerFK ? dataForL : null, wrL);
+      const rFingers = updateHand(handRight, rls.fingerFK ? dataForR : null, wrR);
       placeSph(mHandL, lFingers ? null : fist(wrL, elL), handR);
       placeSph(mHandR, rFingers ? null : fist(wrR, elR), handR);
 
@@ -635,14 +696,15 @@ export function RoomViewport({
       const eyeXm = len(rig.eyeXcm), eyeYm = len(rig.eyeYcm), eyeZm = len(rig.eyeZcm);
       const gx = (pupil ? pupil.x : 0) * eyeRm * 0.55;
       const gy = (pupil ? pupil.y : 0) * eyeRm * 0.55;
-      if (!faceValid) {
-        // No face: a head-local frame whose anchor sits on the FRONT SURFACE of
-        // the head sphere (not its centre), so the small face-local eyeZ keeps
-        // the eyes on the head instead of buried inside it.
+      // faceLocalEyes off (or no face) → head-local frame whose anchor sits on
+      // the FRONT SURFACE of the head sphere (not its centre), so the small
+      // face-local eyeZ keeps the eyes on the head instead of buried inside it.
+      if (!faceValid || !rls.faceLocalEyes) {
         faceR.set(mx, 0, 0); faceU.set(0, 1, 0); faceF.set(0, 0, 1);
         faceO.copy(headC).addScaledVector(faceF, headR);
       }
       const placeEye = (eye: THREE.Mesh, iris: THREE.Mesh, sign: number) => {
+        if (!rls.showEyes) { eye.visible = false; iris.visible = false; return; }
         const ep = faceO.clone()
           .addScaledVector(faceR, sign * eyeXm)
           .addScaledVector(faceU, eyeYm)
