@@ -35,6 +35,12 @@ export interface RigConfig {
   handRcm: number;
   /** Hand length wrist→middle-fingertip (cm) — fixes finger size from capture. */
   handLengthCm: number;
+  // ── per-finger length multipliers (1 = canonical) ──
+  fingerThumb: number;
+  fingerIndex: number;
+  fingerMiddle: number;
+  fingerRing: number;
+  fingerLittle: number;
   // ── eyeballs (cm) ──
   eyeRcm: number;   // eyeball radius
   eyeXcm: number;   // half the eye separation (each eye at ±eyeXcm)
@@ -47,14 +53,16 @@ export interface RigConfig {
   faceOffXcm: number;
   faceOffYcm: number;
   faceOffZcm: number;
+  /** Mannequin skin tone (hex string) — head, face, torso, limbs. */
+  skinHex: string;
   /** Entered standing height at capture (cm). */
   heightCm: number;
   /** Epoch ms of the capture, or null for the default (uncaptured) rig. */
   capturedAt: number | null;
 }
 
-/** Numeric (tunable) RigConfig keys — everything except the capture timestamp. */
-export type RigNumKey = Exclude<keyof RigConfig, "capturedAt">;
+/** Numeric (tunable) RigConfig keys — everything except the timestamp + skin hex. */
+export type RigNumKey = Exclude<keyof RigConfig, "capturedAt" | "skinHex">;
 
 /** Rough adult proportions (~170cm) — used until the user captures their own. */
 export const DEFAULT_RIG: RigConfig = {
@@ -79,6 +87,11 @@ export const DEFAULT_RIG: RigConfig = {
   jointRcm: 4,
   handRcm: 6.5,
   handLengthCm: 19,
+  fingerThumb: 1,
+  fingerIndex: 1,
+  fingerMiddle: 1,
+  fingerRing: 1,
+  fingerLittle: 1,
   eyeRcm: 1.3,
   eyeXcm: 3.2,
   eyeYcm: 1.5,
@@ -87,6 +100,7 @@ export const DEFAULT_RIG: RigConfig = {
   faceOffXcm: 0,
   faceOffYcm: 0,
   faceOffZcm: 0,
+  skinHex: "#d4b080",
   heightCm: 170,
   capturedAt: null,
 };

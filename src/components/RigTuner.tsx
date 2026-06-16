@@ -9,7 +9,18 @@ export interface RigTunerProps {
   rig: RigConfig;
   onChange: (key: RigNumKey, value: number) => void;
   onReset: () => void;
+  /** Snap eye position to the detected face sockets (writes eyeX/Y/Z). */
+  onSnapEyes?: () => void;
+  /** Change mannequin skin tone (hex). */
+  onSkinChange?: (hex: string) => void;
 }
+
+const SKIN_PRESETS: ReadonlyArray<[label: string, hex: string]> = [
+  ["light", "#f0d0b8"],
+  ["medium", "#d4a373"],
+  ["tan", "#d4b080"],
+  ["dark", "#8d5524"],
+];
 
 type Row = [label: string, key: RigNumKey, min: number, max: number, step: number];
 
@@ -45,6 +56,14 @@ const EYES: Row[] = [
   ["eye Z", "eyeZcm", 0, 16, 0.1],
 ];
 
+const FINGERS: Row[] = [
+  ["thumb", "fingerThumb", 0.3, 2.5, 0.05],
+  ["index", "fingerIndex", 0.3, 2.5, 0.05],
+  ["middle", "fingerMiddle", 0.3, 2.5, 0.05],
+  ["ring", "fingerRing", 0.3, 2.5, 0.05],
+  ["little", "fingerLittle", 0.3, 2.5, 0.05],
+];
+
 const RADII: Row[] = [
   ["neck R", "neckRcm", 0.5, 15, 0.1],
   ["torso R", "torsoRcm", 1, 20, 0.1],
@@ -57,7 +76,7 @@ const RADII: Row[] = [
   ["hands R", "handRcm", 1, 15, 0.1],
 ];
 
-export function RigTuner({ rig, onChange, onReset }: RigTunerProps) {
+export function RigTuner({ rig, onChange, onReset, onSnapEyes, onSkinChange }: RigTunerProps) {
   const slider = ([label, k, min, max, step]: Row) => (
     <label className="tuner-row" key={k}>
       <span>{label}</span>
@@ -86,6 +105,33 @@ export function RigTuner({ rig, onChange, onReset }: RigTunerProps) {
       {FACE.map(slider)}
       <div className="tuner-group">eyes (cm)</div>
       {EYES.map(slider)}
+      {onSnapEyes && (
+        <button type="button" className="btn" onClick={onSnapEyes} style={{ marginTop: 4 }}>
+          snap eyes to face
+        </button>
+      )}
+      <div className="tuner-group">fingers (× length)</div>
+      {FINGERS.map(slider)}
+      <div className="tuner-group">skin tone</div>
+      <div className="tuner-skin">
+        {SKIN_PRESETS.map(([label, hex]) => (
+          <button
+            key={hex}
+            type="button"
+            className={`tuner-swatch${rig.skinHex.toLowerCase() === hex.toLowerCase() ? " active" : ""}`}
+            style={{ background: hex }}
+            title={label}
+            onClick={() => onSkinChange?.(hex)}
+          />
+        ))}
+        <input
+          type="color"
+          className="tuner-color"
+          value={rig.skinHex}
+          title="custom skin tone"
+          onChange={(e) => onSkinChange?.(e.target.value)}
+        />
+      </div>
       <div className="tuner-group">thickness (cm radius)</div>
       {RADII.map(slider)}
       <button type="button" className="btn" onClick={onReset} style={{ marginTop: 10 }}>

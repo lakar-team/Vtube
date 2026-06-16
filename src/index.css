@@ -389,6 +389,33 @@ body {
   color: var(--text);
 }
 
+.tuner-skin {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+}
+.tuner-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  padding: 0;
+  cursor: pointer;
+}
+.tuner-swatch.active {
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.25);
+}
+.tuner-color {
+  width: 28px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  background: none;
+  cursor: pointer;
+}
+
 .viewport-status,
 .pane-status {
   position: absolute;

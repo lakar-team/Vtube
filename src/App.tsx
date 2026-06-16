@@ -152,6 +152,68 @@ export default function App() {
     saveRigConfig(next);
   };
 
+  const changeSkin = (hex: string) => {
+    setRigConfig((prev) => {
+      const next = { ...prev, skinHex: hex };
+      saveRigConfig(next);
+      return next;
+    });
+  };
+
+  // Snap eye position into the detected face sockets. Mirrors the RoomViewport
+  // face transform (centroid-relative → metric, faceScale, face offset, +N·headR
+  // fulcrum shift) so the eyeballs land where the rendered face sockets are.
+  const snapEyesToSockets = () => {
+    const face = mocap.debugLandmarksRef.current.face;
+    if (!face || face.length < 468) {
+      console.warn("[snap eyes] no face landmarks — face the camera and retry");
+      return;
+    }
+    const rig = rigConfigRef.current;
+    const mx = mirror ? -1 : 1;
+    let cx = 0, cy = 0, cz = 0, minY = 1, maxY = 0;
+    for (let i = 0; i < 468; i++) {
+      const p = face[i];
+      cx += p.x; cy += p.y; cz += p.z;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    cx /= 468; cy /= 468; cz /= 468;
+    const headR = Math.max((rig.headDiameterCm / 100) * 0.65, 0.04);
+    const FACE_FIT = 0.85;
+    const fScale = (headR * 2 * FACE_FIT * rig.faceScale) / Math.max(maxY - minY, 1e-3);
+    // Face-forward normal (room space) from forehead(10)/chin(152) + sides(234/454).
+    const rvx = (i: number) => mx * (face[i].x - cx);
+    const rvy = (i: number) => -(face[i].y - cy);
+    const rvz = (i: number) => -(face[i].z - cz);
+    const ux = rvx(10) - rvx(152), uy = rvy(10) - rvy(152), uz = rvz(10) - rvz(152);
+    const sx = rvx(454) - rvx(234), sy = rvy(454) - rvy(234), sz = rvz(454) - rvz(234);
+    let nx = sy * uz - sz * uy, ny = sz * ux - sx * uz, nz = sx * uy - sy * ux;
+    const nl = Math.hypot(nx, ny, nz) || 1;
+    nx /= nl; ny /= nl; nz /= nl;
+    if (nz < 0) { nx = -nx; ny = -ny; nz = -nz; }
+    // Offset of a landmark from the head centre (m).
+    const off = (i: number) => ({
+      x: rig.faceOffXcm / 100 + mx * (face[i].x - cx) * fScale + nx * headR,
+      y: rig.faceOffYcm / 100 + -(face[i].y - cy) * fScale + ny * headR,
+      z: rig.faceOffZcm / 100 + -(face[i].z - cz) * fScale + nz * headR,
+    });
+    const eye = (a: number, b: number) => {
+      const A = off(a), B = off(b);
+      return { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2, z: (A.z + B.z) / 2 };
+    };
+    const L = eye(362, 263); // left eye inner/outer corners
+    const R = eye(33, 133);  // right eye outer/inner corners
+    const eyeXcm = (Math.abs(L.x - R.x) / 2) * 100;
+    const eyeYcm = ((L.y + R.y) / 2) * 100;
+    const eyeZcm = ((L.z + R.z) / 2) * 100;
+    setRigConfig((prev) => {
+      const next = { ...prev, eyeXcm, eyeYcm, eyeZcm };
+      saveRigConfig(next);
+      return next;
+    });
+  };
+
   return (
     <div className="app">
       <header className="topbar">
@@ -308,7 +370,13 @@ export default function App() {
                 lmOpts={lmOpts}
               />
             </div>
-            <RigTuner rig={rigConfig} onChange={changeRigField} onReset={resetRig} />
+            <RigTuner
+              rig={rigConfig}
+              onChange={changeRigField}
+              onReset={resetRig}
+              onSnapEyes={snapEyesToSockets}
+              onSkinChange={changeSkin}
+            />
           </section>
         )}
       </main>

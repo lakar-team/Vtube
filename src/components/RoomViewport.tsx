@@ -55,6 +55,17 @@ const HAND_BONE_FRAC: readonly number[] = [
   0.07, 0.18, 0.10, 0.08,   // little
   0.42,                     // palm edge 0→17 (drawn only)
 ];
+// Which finger each HAND_BONES entry belongs to → index into the per-frame
+// multiplier array [thumb, index, middle, ring, little]. Bone 20 (palm edge) is
+// structural, never scaled (-1).
+const HAND_BONE_FINGER: readonly number[] = [
+  0, 0, 0, 0,   // thumb
+  1, 1, 1, 1,   // index
+  2, 2, 2, 2,   // middle
+  3, 3, 3, 3,   // ring
+  4, 4, 4, 4,   // little
+  -1,           // palm edge
+];
 
 // Default (T-pose) directions in room space, used when a live direction is missing.
 const D_UP   = new THREE.Vector3(0, 1, 0);
@@ -68,6 +79,9 @@ const D_FOOT = new THREE.Vector3(0, -0.3, 1).normalize();
 const _v2 = new THREE.Vector3();
 const _q  = new THREE.Quaternion();
 const _Y  = new THREE.Vector3(0, 1, 0);
+const _fUp   = new THREE.Vector3();
+const _fSide = new THREE.Vector3();
+const _fN    = new THREE.Vector3();
 
 function makeCyl(mat: THREE.Material): THREE.Mesh {
   return new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 12, 1), mat);
@@ -312,6 +326,21 @@ export function RoomViewport({
 
     let disposed = false;
 
+    // Skin tone — recolour materials only when rig.skinHex changes. Head/neck/
+    // torso/face use the pure skin colour; limbs keep a 75/25 blue/red tint so
+    // the left/right cue survives.
+    let lastSkin = "";
+    const _skin = new THREE.Color();
+    const _blue = new THREE.Color(0x4477cc);
+    const _red  = new THREE.Color(0xcc3344);
+    const applySkin = (hex: string) => {
+      _skin.set(hex);
+      matC.color.copy(_skin);
+      matFaceFill.color.copy(_skin);
+      matL.color.copy(_skin).lerp(_blue, 0.25);
+      matR.color.copy(_skin).lerp(_red, 0.25);
+    };
+
     renderer.setAnimationLoop(() => {
       if (disposed) return;
 
@@ -326,6 +355,7 @@ export function RoomViewport({
       const pw = procLm(poseProc, debugLandmarksRef.current.poseWorld, o.persistPose, o.smoothing, alpha);
       const poseImg = debugLandmarksRef.current.pose;
       const rig = rigRef.current;
+      if (rig.skinHex !== lastSkin) { lastSkin = rig.skinHex; applySkin(rig.skinHex); }
       const mx = mirrorRef.current ? -1 : 1;
       const len = (cm: number) => cm / 100; // cm → meters
 
@@ -415,6 +445,26 @@ export function RoomViewport({
           faceVerts[i * 3 + 1] = -(p.y - cy) * fScale;
           faceVerts[i * 3 + 2] = -(p.z - cz) * fScale;
         }
+        // Fulcrum fix: orbit the HEAD-SPHERE CENTRE, not the face plane's own
+        // centroid. Estimate the face-forward normal N (room space) from the
+        // forehead(10)/chin(152) and side(234/454) landmarks, then shift every
+        // vertex by +N·headR so the pivot point (centroid − N·headR ≈ the head
+        // centre) lands on the mesh anchor. Without this the flat face swings on
+        // its own mid-plane hinge when the head turns.
+        const fv = (i: number, o: number) => faceVerts[i * 3 + o];
+        _fUp.set(fv(10, 0) - fv(152, 0), fv(10, 1) - fv(152, 1), fv(10, 2) - fv(152, 2));
+        _fSide.set(fv(454, 0) - fv(234, 0), fv(454, 1) - fv(234, 1), fv(454, 2) - fv(234, 2));
+        _fN.crossVectors(_fSide, _fUp);
+        if (_fN.lengthSq() > 1e-9) {
+          _fN.normalize();
+          if (_fN.z < 0) _fN.multiplyScalar(-1); // point toward the viewer
+          const sx = _fN.x * headR, sy = _fN.y * headR, sz = _fN.z * headR;
+          for (let i = 0; i < 468; i++) {
+            faceVerts[i * 3]     += sx;
+            faceVerts[i * 3 + 1] += sy;
+            faceVerts[i * 3 + 2] += sz;
+          }
+        }
         facePosAttr.needsUpdate = true;
         faceFillGeom.computeVertexNormals();
         const fx = headC.x + len(rig.faceOffXcm);
@@ -462,8 +512,11 @@ export function RoomViewport({
           hr.bones.visible = false;
           return false;
         }
-        // FK: fixed bone lengths (canonical fraction × captured hand length),
-        // live bone directions from the image landmarks (scale-invariant).
+        // FK: fixed bone lengths (canonical fraction × per-finger multiplier ×
+        // captured hand length), live bone directions from the image landmarks.
+        const fingerMul = [
+          rig.fingerThumb, rig.fingerIndex, rig.fingerMiddle, rig.fingerRing, rig.fingerLittle,
+        ];
         const jp: THREE.Vector3[] = new Array(21);
         jp[0] = wrist.clone();
         for (let k = 0; k < 20; k++) {
@@ -473,7 +526,9 @@ export function RoomViewport({
             -(lm[b].y - lm[a].y),
             -(lm[b].z - lm[a].z),
           ).normalize();
-          jp[b] = jp[a].clone().addScaledVector(d, HAND_BONE_FRAC[k] * handLenM);
+          const fi = HAND_BONE_FINGER[k];
+          const mul = fi >= 0 ? fingerMul[fi] : 1;
+          jp[b] = jp[a].clone().addScaledVector(d, HAND_BONE_FRAC[k] * mul * handLenM);
         }
         for (let i = 0; i < 21; i++) placeSph(hr.joints[i], jp[i], R_FINGER_JNT);
         for (let k = 0; k < HAND_BONES.length; k++) {
