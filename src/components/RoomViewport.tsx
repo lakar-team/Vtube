@@ -98,28 +98,88 @@ const D_LARM_REST_R = new THREE.Vector3( 0.28, -0.96, 0.02).normalize();
 // the palm is rendered as one flattened box instead. Keyed by HAND_BONES index.
 const PALM_FAN_BONES = new Set<number>([4, 8, 12, 16]);
 
-// Default bone name mapping: vtube joint name → Mixamo GLB bone name.
-// Users can override with a sidecar .json (same keys, custom bone names).
+// Mixamo bone name → GLB bone name lookup.
+// Keys ARE the standard Mixamo names; values match by default but are rewritten
+// for colon-prefix exports (mixamorig:Hips style) or overridden by a sidecar .json.
 const DEFAULT_BONE_MAP: Record<string, string> = {
-  hips:      "mixamorigHips",
-  torso:     "mixamorigSpine2",
-  neck:      "mixamorigNeck",
-  head:      "mixamorigHead",
-  shoulderL: "mixamorigLeftShoulder",
-  upperArmL: "mixamorigLeftArm",
-  lowerArmL: "mixamorigLeftForeArm",
-  wristL:    "mixamorigLeftHand",
-  shoulderR: "mixamorigRightShoulder",
-  upperArmR: "mixamorigRightArm",
-  lowerArmR: "mixamorigRightForeArm",
-  wristR:    "mixamorigRightHand",
-  upperLegL: "mixamorigLeftUpLeg",
-  lowerLegL: "mixamorigLeftLeg",
-  ankleL:    "mixamorigLeftFoot",
-  upperLegR: "mixamorigRightUpLeg",
-  lowerLegR: "mixamorigRightLeg",
-  ankleR:    "mixamorigRightFoot",
+  // Body
+  mixamorigHips:           "mixamorigHips",
+  mixamorigSpine:          "mixamorigSpine",
+  mixamorigSpine1:         "mixamorigSpine1",
+  mixamorigSpine2:         "mixamorigSpine2",
+  mixamorigNeck:           "mixamorigNeck",
+  mixamorigHead:           "mixamorigHead",
+  mixamorigLeftShoulder:   "mixamorigLeftShoulder",
+  mixamorigRightShoulder:  "mixamorigRightShoulder",
+  mixamorigLeftArm:        "mixamorigLeftArm",
+  mixamorigRightArm:       "mixamorigRightArm",
+  mixamorigLeftForeArm:    "mixamorigLeftForeArm",
+  mixamorigRightForeArm:   "mixamorigRightForeArm",
+  mixamorigLeftHand:       "mixamorigLeftHand",
+  mixamorigRightHand:      "mixamorigRightHand",
+  mixamorigLeftUpLeg:      "mixamorigLeftUpLeg",
+  mixamorigRightUpLeg:     "mixamorigRightUpLeg",
+  mixamorigLeftLeg:        "mixamorigLeftLeg",
+  mixamorigRightLeg:       "mixamorigRightLeg",
+  mixamorigLeftFoot:       "mixamorigLeftFoot",
+  mixamorigRightFoot:      "mixamorigRightFoot",
+  // Left fingers
+  mixamorigLeftHandThumb1:  "mixamorigLeftHandThumb1",
+  mixamorigLeftHandThumb2:  "mixamorigLeftHandThumb2",
+  mixamorigLeftHandThumb3:  "mixamorigLeftHandThumb3",
+  mixamorigLeftHandIndex1:  "mixamorigLeftHandIndex1",
+  mixamorigLeftHandIndex2:  "mixamorigLeftHandIndex2",
+  mixamorigLeftHandIndex3:  "mixamorigLeftHandIndex3",
+  mixamorigLeftHandMiddle1: "mixamorigLeftHandMiddle1",
+  mixamorigLeftHandMiddle2: "mixamorigLeftHandMiddle2",
+  mixamorigLeftHandMiddle3: "mixamorigLeftHandMiddle3",
+  mixamorigLeftHandRing1:   "mixamorigLeftHandRing1",
+  mixamorigLeftHandRing2:   "mixamorigLeftHandRing2",
+  mixamorigLeftHandRing3:   "mixamorigLeftHandRing3",
+  mixamorigLeftHandPinky1:  "mixamorigLeftHandPinky1",
+  mixamorigLeftHandPinky2:  "mixamorigLeftHandPinky2",
+  mixamorigLeftHandPinky3:  "mixamorigLeftHandPinky3",
+  // Right fingers
+  mixamorigRightHandThumb1:  "mixamorigRightHandThumb1",
+  mixamorigRightHandThumb2:  "mixamorigRightHandThumb2",
+  mixamorigRightHandThumb3:  "mixamorigRightHandThumb3",
+  mixamorigRightHandIndex1:  "mixamorigRightHandIndex1",
+  mixamorigRightHandIndex2:  "mixamorigRightHandIndex2",
+  mixamorigRightHandIndex3:  "mixamorigRightHandIndex3",
+  mixamorigRightHandMiddle1: "mixamorigRightHandMiddle1",
+  mixamorigRightHandMiddle2: "mixamorigRightHandMiddle2",
+  mixamorigRightHandMiddle3: "mixamorigRightHandMiddle3",
+  mixamorigRightHandRing1:   "mixamorigRightHandRing1",
+  mixamorigRightHandRing2:   "mixamorigRightHandRing2",
+  mixamorigRightHandRing3:   "mixamorigRightHandRing3",
+  mixamorigRightHandPinky1:  "mixamorigRightHandPinky1",
+  mixamorigRightHandPinky2:  "mixamorigRightHandPinky2",
+  mixamorigRightHandPinky3:  "mixamorigRightHandPinky3",
 };
+
+// [parentLandmark, childLandmark] pairs for Mixamo finger bones (15 per hand).
+// Ordered Thumb123 / Index123 / Middle123 / Ring123 / Pinky123.
+const FINGER_LM_PAIRS: ReadonlyArray<readonly [number, number]> = [
+  [1, 2], [2, 3], [3, 4],
+  [5, 6], [6, 7], [7, 8],
+  [9, 10], [10, 11], [11, 12],
+  [13, 14], [14, 15], [15, 16],
+  [17, 18], [18, 19], [19, 20],
+];
+const FINGER_BONES_L: readonly string[] = [
+  "mixamorigLeftHandThumb1",  "mixamorigLeftHandThumb2",  "mixamorigLeftHandThumb3",
+  "mixamorigLeftHandIndex1",  "mixamorigLeftHandIndex2",  "mixamorigLeftHandIndex3",
+  "mixamorigLeftHandMiddle1", "mixamorigLeftHandMiddle2", "mixamorigLeftHandMiddle3",
+  "mixamorigLeftHandRing1",   "mixamorigLeftHandRing2",   "mixamorigLeftHandRing3",
+  "mixamorigLeftHandPinky1",  "mixamorigLeftHandPinky2",  "mixamorigLeftHandPinky3",
+];
+const FINGER_BONES_R: readonly string[] = [
+  "mixamorigRightHandThumb1",  "mixamorigRightHandThumb2",  "mixamorigRightHandThumb3",
+  "mixamorigRightHandIndex1",  "mixamorigRightHandIndex2",  "mixamorigRightHandIndex3",
+  "mixamorigRightHandMiddle1", "mixamorigRightHandMiddle2", "mixamorigRightHandMiddle3",
+  "mixamorigRightHandRing1",   "mixamorigRightHandRing2",   "mixamorigRightHandRing3",
+  "mixamorigRightHandPinky1",  "mixamorigRightHandPinky2",  "mixamorigRightHandPinky3",
+];
 
 // Eyelid-ring landmarks, ordered around each eye (lower lid then upper lid), used
 // to build a smooth almond eye SOCKET (triangle fan) rather than a jagged
@@ -223,6 +283,8 @@ export interface RuleFlags {
   showEyes: boolean;
   /** Drive the loaded GLB model instead of the procedural skeleton. */
   useCustomModel: boolean;
+  /** Apply ARKit blendshapes to the GLB model's face mesh (disable for helmets/robots). */
+  useModelFace: boolean;
 }
 
 export const DEFAULT_RULES: RuleFlags = {
@@ -234,6 +296,7 @@ export const DEFAULT_RULES: RuleFlags = {
   showFaceMesh: true,
   showEyes: true,
   useCustomModel: false,
+  useModelFace: true,
 };
 
 export interface RoomViewportProps {
@@ -251,7 +314,7 @@ export interface RoomViewportProps {
   rules?: RuleFlags;
   /** Object URL for a loaded GLB/GLTF file to drive instead of the procedural skeleton. */
   modelUrl?: string | null;
-  /** Overrides for the default Mixamo bone name map. Keys = vtube joint names. */
+  /** Overrides for the default Mixamo bone name map. Keys = Mixamo bone names. */
   modelBoneMapOverride?: Record<string, string> | null;
 }
 
@@ -263,10 +326,15 @@ interface LoadedModel {
 }
 
 // Module-scope temps for bone driving — allocated once, reused every frame.
-const _bDir = new THREE.Vector3();
-const _bTQ  = new THREE.Quaternion();
-const _bPQ  = new THREE.Quaternion();
-const _bYup = new THREE.Vector3(0, 1, 0);
+const _bDir       = new THREE.Vector3();
+const _bTQ        = new THREE.Quaternion();
+const _bPQ        = new THREE.Quaternion();
+const _bYup       = new THREE.Vector3(0, 1, 0);
+const _qTorsoFull = new THREE.Quaternion();
+const _qSpinePart = new THREE.Quaternion();
+const _qIdent     = new THREE.Quaternion(); // stays identity (0,0,0,1)
+const _spineD     = new THREE.Vector3();
+const _fingerD    = new THREE.Vector3();
 
 export function RoomViewport({
   debugLandmarksRef,
@@ -347,9 +415,11 @@ export function RoomViewport({
     figureRef.current = figure;
     scene.add(figure);
 
-    const mHead  = makeSph(matC);
-    const mNeck  = makeCyl(matC);
-    const mTorso = makeCyl(matC);
+    const mHead   = makeSph(matC);
+    const mNeck   = makeCyl(matC);
+    const mSpine  = makeCyl(matC);
+    const mSpine1 = makeCyl(matC);
+    const mSpine2 = makeCyl(matC);
 
     // Limb cylinders taper toward the extremity for a more anatomical look.
     const mUArmL = makeCyl(matL, LIMB_TAPER); const mUArmR = makeCyl(matR, LIMB_TAPER);
@@ -367,7 +437,7 @@ export function RoomViewport({
     const mJAnL = makeSph(matL); const mJAnR = makeSph(matR);
 
     const meshes: THREE.Mesh[] = [
-      mHead, mNeck, mTorso,
+      mHead, mNeck, mSpine, mSpine1, mSpine2,
       mUArmL, mLArmL, mHandL, mULegL, mLLegL, mFootL,
       mUArmR, mLArmR, mHandR, mULegR, mLLegR, mFootR,
       mJShL, mJElL, mJWrL, mJHpL, mJKnL, mJAnL,
@@ -600,9 +670,13 @@ export function RoomViewport({
 
       const headR = Math.max(len(rig.headDiameterCm) * 0.65, 0.04);
       const jR = len(rig.jointRcm);
+      const spine  = hipMid.clone().lerp(shMid, 1 / 3);
+      const spine1 = hipMid.clone().lerp(shMid, 2 / 3);
       placeSph(mHead, headC, headR * HEAD_SPHERE_FIT);
-      placeCyl(mNeck, headC, shMid, len(rig.neckRcm));
-      placeCyl(mTorso, shMid, hipMid, len(rig.torsoRcm));
+      placeCyl(mNeck,   headC, shMid,  len(rig.neckRcm));
+      placeCyl(mSpine,  hipMid, spine,  len(rig.torsoRcm));
+      placeCyl(mSpine1, spine,  spine1, len(rig.torsoRcm));
+      placeCyl(mSpine2, spine1, shMid,  len(rig.torsoRcm));
 
       placeCyl(mUArmL, shL, elL, len(rig.upperArmRcm));  placeCyl(mUArmR, shR, elR, len(rig.upperArmRcm));
       placeCyl(mLArmL, elL, wrL, len(rig.lowerArmRcm));  placeCyl(mLArmR, elR, wrR, len(rig.lowerArmRcm));
@@ -880,24 +954,14 @@ export function RoomViewport({
       }
 
       if (useModel && model) {
-        // Drive a Mixamo bone so its local +Y points along `dir` in world space.
-        // Assumes Mixamo convention: each bone's local +Y = parent-to-child axis.
-        // Process in root-first order — after setting each bone's quaternion,
-        // manually update its matrix and matrixWorld so children get a fresh
-        // parent matrixWorld when they compute their own local quaternion.
-        const driveBone = (
-          joint: string,
-          a: THREE.Vector3 | null,
-          b: THREE.Vector3 | null,
-          fallback: THREE.Vector3,
-        ) => {
+        // Drive a bone so its local +Y = worldDir. Process root-first: after
+        // setting each bone's quaternion, update matrix + matrixWorld so children
+        // see a fresh parent matrixWorld when they compute their own local quat.
+        const driveBoneByDir = (joint: string, worldDir: THREE.Vector3) => {
           const bName = model.boneMap[joint];
           const bone = bName ? model.bones.get(bName) : undefined;
           if (!bone) return;
-          const dir = (a && b && _bDir.subVectors(b, a).lengthSq() > 1e-8)
-            ? _bDir.subVectors(b, a).normalize()
-            : fallback;
-          _bTQ.setFromUnitVectors(_bYup, dir);
+          _bTQ.setFromUnitVectors(_bYup, worldDir);
           if (bone.parent) {
             bone.parent.getWorldQuaternion(_bPQ);
             bone.quaternion.copy(_bPQ.invert()).premultiply(_bTQ);
@@ -909,28 +973,84 @@ export function RoomViewport({
             bone.matrixWorld.multiplyMatrices(bone.parent.matrixWorld, bone.matrix);
           }
         };
+        const driveBone = (
+          joint: string,
+          a: THREE.Vector3 | null,
+          b: THREE.Vector3 | null,
+          fallback: THREE.Vector3,
+        ) => {
+          const d = (a && b && _bDir.subVectors(b, a).lengthSq() > 1e-8)
+            ? _bDir.subVectors(b, a).normalize()
+            : fallback;
+          driveBoneByDir(joint, d);
+        };
 
-        // ── root → tip order ─────────────────────────────────────
-        driveBone("torso",     hipMid, shMid,   D_UP);
-        driveBone("neck",      shMid,  headC,   D_UP);
-        driveBone("head",      headC,  ext(headC, headDir, rig.headDiameterCm * 0.5), headDir);
+        // ── spine (3 bones, weighted slerp: 20% / 55% / 100%) ────────────
+        const torsoD = dir(hipMid, shMid, D_UP);
+        _qTorsoFull.setFromUnitVectors(_bYup, torsoD);
+        _qSpinePart.slerpQuaternions(_qIdent, _qTorsoFull, 0.20);
+        driveBoneByDir("mixamorigSpine",  _spineD.copy(_bYup).applyQuaternion(_qSpinePart));
+        _qSpinePart.slerpQuaternions(_qIdent, _qTorsoFull, 0.55);
+        driveBoneByDir("mixamorigSpine1", _spineD.copy(_bYup).applyQuaternion(_qSpinePart));
+        driveBoneByDir("mixamorigSpine2", torsoD);
 
-        driveBone("shoulderL", shMid, shL, D_UARM_REST_L);
-        driveBone("shoulderR", shMid, shR, D_UARM_REST_R);
+        // ── neck / head ───────────────────────────────────────────────────
+        driveBone("mixamorigNeck", shMid, headC, D_UP);
+        driveBone("mixamorigHead", headC, ext(headC, headDir, rig.headDiameterCm * 0.5), headDir);
 
-        driveBone("upperArmL", shL,  elL,  D_UARM_REST_L);
-        driveBone("upperArmR", shR,  elR,  D_UARM_REST_R);
-        driveBone("lowerArmL", elL,  wrL,  D_LARM_REST_L);
-        driveBone("lowerArmR", elR,  wrR,  D_LARM_REST_R);
-        driveBone("wristL",    elL,  wrL,  D_LARM_REST_L);
-        driveBone("wristR",    elR,  wrR,  D_LARM_REST_R);
+        // ── shoulders (clavicles) ─────────────────────────────────────────
+        driveBone("mixamorigLeftShoulder",  shMid, shL, D_UARM_REST_L);
+        driveBone("mixamorigRightShoulder", shMid, shR, D_UARM_REST_R);
 
-        driveBone("upperLegL", hipL, knL,  D_DOWN);
-        driveBone("upperLegR", hipR, knR,  D_DOWN);
-        driveBone("lowerLegL", knL,  anL,  D_DOWN);
-        driveBone("lowerLegR", knR,  anR,  D_DOWN);
-        driveBone("ankleL",    anL,  toeL, D_FOOT);
-        driveBone("ankleR",    anR,  toeR, D_FOOT);
+        // ── arms ─────────────────────────────────────────────────────────
+        driveBone("mixamorigLeftArm",      shL, elL, D_UARM_REST_L);
+        driveBone("mixamorigRightArm",     shR, elR, D_UARM_REST_R);
+        driveBone("mixamorigLeftForeArm",  elL, wrL, D_LARM_REST_L);
+        driveBone("mixamorigRightForeArm", elR, wrR, D_LARM_REST_R);
+        driveBone("mixamorigLeftHand",     elL, wrL, D_LARM_REST_L);
+        driveBone("mixamorigRightHand",    elR, wrR, D_LARM_REST_R);
+
+        // ── legs ─────────────────────────────────────────────────────────
+        driveBone("mixamorigLeftUpLeg",  hipL, knL,  D_DOWN);
+        driveBone("mixamorigRightUpLeg", hipR, knR,  D_DOWN);
+        driveBone("mixamorigLeftLeg",    knL,  anL,  D_DOWN);
+        driveBone("mixamorigRightLeg",   knR,  anR,  D_DOWN);
+        driveBone("mixamorigLeftFoot",   anL,  toeL, D_FOOT);
+        driveBone("mixamorigRightFoot",  anR,  toeR, D_FOOT);
+
+        // ── fingers (15 bones per hand from MediaPipe hand landmarks) ─────
+        const driveFingers = (lm: NormalizedLandmark[] | null, names: readonly string[]) => {
+          if (!lm || lm.length < 21) return;
+          for (let f = 0; f < 15; f++) {
+            const [ia, ib] = FINGER_LM_PAIRS[f];
+            _fingerD.set(
+              mx * (lm[ib].x - lm[ia].x),
+              -(lm[ib].y - lm[ia].y),
+              -(lm[ib].z - lm[ia].z),
+            );
+            if (_fingerD.lengthSq() < 1e-9) continue;
+            driveBoneByDir(names[f], _fingerD.normalize());
+          }
+        };
+        driveFingers(dataForL, FINGER_BONES_L);
+        driveFingers(dataForR, FINGER_BONES_R);
+
+        // ── blendshapes (52 ARKit values → GLB morph targets) ────────────
+        if (rls.useModelFace) {
+          const expr = frameRef.current?.expressions;
+          if (expr) {
+            model.group.traverse((obj) => {
+              if (!(obj instanceof THREE.SkinnedMesh)) return;
+              const dict = obj.morphTargetDictionary;
+              const infl = obj.morphTargetInfluences;
+              if (!dict || !infl) return;
+              for (const [name, value] of Object.entries(expr)) {
+                const idx = dict[name];
+                if (idx !== undefined) infl[idx] = value as number;
+              }
+            });
+          }
+        }
       }
 
       renderer.render(scene, camera);
@@ -1072,8 +1192,8 @@ export function RoomViewport({
 
       // Y offset: position model so hips bone sits at figure's hip origin.
       // Use getWorldPosition after scene.add() to account for intermediate parents.
-      const hipsBone = bones.get(boneMap.hips ?? "");
-      console.log(`[GLB] hips bone "${boneMap.hips}" found: ${!!hipsBone}`);
+      const hipsBone = bones.get(boneMap["mixamorigHips"] ?? "");
+      console.log(`[GLB] hips bone "${boneMap["mixamorigHips"]}" found: ${!!hipsBone}`);
       const _tmpVec = new THREE.Vector3();
       const hipsLocalY = hipsBone ? hipsBone.getWorldPosition(_tmpVec).y : 0;
 
