@@ -398,7 +398,11 @@ export default function App() {
               const f = e.target.files?.[0];
               if (!f) return;
               if (modelUrl) URL.revokeObjectURL(modelUrl);
-              setModelUrl(URL.createObjectURL(f));
+              const url = URL.createObjectURL(f);
+              console.log("[App] model picked:", f.name, "size:", f.size, "url:", url);
+              setModelUrl(url);
+              // Auto-enable the custom model on load so the user sees it immediately.
+              setRule("useCustomModel", true);
               e.target.value = "";
             }}
           />
@@ -487,6 +491,8 @@ export default function App() {
                 roomM={roomM}
                 lmOpts={lmOpts}
                 rules={rules}
+                modelUrl={modelUrl}
+                modelBoneMapOverride={modelBoneMapOverride}
               />
             </div>
             <RigTuner
@@ -510,6 +516,8 @@ export default function App() {
                 roomM={roomM}
                 lmOpts={lmOpts}
                 rules={rules}
+                modelUrl={modelUrl}
+                modelBoneMapOverride={modelBoneMapOverride}
               />
             </div>
             <RulesInspector toggles={ruleToggles} />

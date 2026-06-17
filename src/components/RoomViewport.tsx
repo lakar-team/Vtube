@@ -1127,7 +1127,11 @@ export function RoomViewport({
     }
 
     const scene = sceneRef.current;
-    if (!scene) return;
+    console.log("[GLB] loader effect fired — url:", modelUrl.slice(0, 60), "sceneReady:", !!scene);
+    if (!scene) {
+      console.warn("[GLB] scene not ready yet — model will not load. This is a bug.");
+      return;
+    }
 
     let cancelled = false;
     const loader = new GLTFLoader();
@@ -1150,19 +1154,28 @@ export function RoomViewport({
 
       const group = gltf.scene;
 
-      // Scale to match user's captured height.
-      const box = new THREE.Box3().setFromObject(group);
-      const modelHeight = box.max.y - box.min.y;
+      // Bounding box before scaling (raw model units).
+      const boxRaw = new THREE.Box3().setFromObject(group);
+      const modelHeight = boxRaw.max.y - boxRaw.min.y;
       const targetHeight = rigRef.current.heightCm / 100;
       const scl = modelHeight > 0.01 ? targetHeight / modelHeight : 1;
       group.scale.setScalar(scl);
+      console.log(
+        `[GLB] onLoad — raw bbox Y: [${boxRaw.min.y.toFixed(3)}, ${boxRaw.max.y.toFixed(3)}]`,
+        `height=${modelHeight.toFixed(3)} units → scale=${scl.toFixed(5)} (target ${targetHeight.toFixed(2)}m)`,
+      );
 
       // Collect all bones by name.
       const bones = new Map<string, THREE.Bone>();
+      let meshCount = 0;
       group.traverse((obj) => {
         if (obj instanceof THREE.Bone) bones.set(obj.name, obj);
+        if (obj instanceof THREE.SkinnedMesh) meshCount++;
       });
-      console.log(`[GLB] loaded ${bones.size} bones`);
+      console.log(
+        `[GLB] ${bones.size} bones, ${meshCount} skinned meshes`,
+        "— first 10:", [...bones.keys()].slice(0, 10).join(", "),
+      );
 
       // Disable frustum culling on all skinned meshes — the rest-pose bbox
       // is wrong after FK drives bones outside the bind pose.
@@ -1176,14 +1189,19 @@ export function RoomViewport({
       // Auto-detect Mixamo colon naming convention (mixamorig:Hips vs mixamorigHips).
       // Newer Mixamo exports prefix every bone name with "mixamorig:" (colon).
       if (!bones.has("mixamorigHips") && bones.has("mixamorig:Hips")) {
-        console.log("[GLB] detected colon bone naming (mixamorig:Hips), rewriting map");
+        console.log("[GLB] detected colon bone naming — rewriting map to mixamorig: prefix");
         const rewritten: Record<string, string> = {};
         for (const [joint, boneName] of Object.entries(boneMap)) {
           rewritten[joint] = boneName.replace(/^mixamorig(?!:)/, "mixamorig:");
         }
         boneMap = rewritten;
+      } else if (bones.has("mixamorigHips")) {
+        console.log("[GLB] bone naming: mixamorigHips (no colon)");
       } else {
-        console.log("[GLB] bone naming convention: mixamorigHips (no colon)");
+        console.warn(
+          "[GLB] neither mixamorigHips nor mixamorig:Hips found.",
+          "Bone names in model:", [...bones.keys()].slice(0, 20).join(", "),
+        );
       }
 
       // Add to scene first so getWorldPosition reflects final scale + hierarchy.
@@ -1192,14 +1210,31 @@ export function RoomViewport({
 
       // Y offset: position model so hips bone sits at figure's hip origin.
       // Use getWorldPosition after scene.add() to account for intermediate parents.
-      const hipsBone = bones.get(boneMap["mixamorigHips"] ?? "");
-      console.log(`[GLB] hips bone "${boneMap["mixamorigHips"]}" found: ${!!hipsBone}`);
+      const hipsKey = boneMap["mixamorigHips"] ?? "";
+      const hipsBone = bones.get(hipsKey);
       const _tmpVec = new THREE.Vector3();
       const hipsLocalY = hipsBone ? hipsBone.getWorldPosition(_tmpVec).y : 0;
+      console.log(
+        `[GLB] hips bone "${hipsKey}" found:`, !!hipsBone,
+        "— hipsLocalY:", hipsLocalY.toFixed(3),
+        "— hipHeightCm target:", rigRef.current.hipHeightCm.toFixed(1),
+      );
+      if (!hipsBone) {
+        console.warn("[GLB] hips bone missing — model will sit at Y=0. Check bone names above.");
+      }
+
+      // Final bounding box after scaling (should be ~targetHeight m tall).
+      const boxFinal = new THREE.Box3().setFromObject(group);
+      console.log(
+        `[GLB] final bbox after scale: Y=[${boxFinal.min.y.toFixed(3)}, ${boxFinal.max.y.toFixed(3)}]`,
+        `height=${(boxFinal.max.y - boxFinal.min.y).toFixed(3)}m`,
+        `— group.position will be set to Y=${(rigRef.current.hipHeightCm / 100 - hipsLocalY).toFixed(3)}m`,
+      );
 
       loadedModelRef.current = { group, bones, boneMap, hipsLocalY };
+      console.log("[GLB] loadedModelRef set — model ready for rendering");
     }, undefined, (err) => {
-      console.error("[GLB loader]", err);
+      console.error("[GLB loader] load error:", err);
     });
 
     return () => {
