@@ -6,6 +6,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import type { DebugLandmarks, MocapFrame } from "../mocap/types";
 import type { RigConfig } from "../mocap/rig";
+import { mpWorldToThree } from "../mocap/coordTransform";
 import { FACE_CONTOURS, FACE_TRIANGLES } from "./faceMeshData";
 
 /**
@@ -327,12 +328,15 @@ interface LoadedModel {
   boneMap: Record<string, string>;
   hipsLocalY: number;
   boneRestQuats: Map<string, THREE.Quaternion>;
+  /** Direction each bone points in its parent's local space at bind pose.
+   *  Derived from bone.children[0].position at load time. Used by driveBoneByDir
+   *  so setFromUnitVectors rotates FROM the actual rest direction, not assumed Y-up. */
+  boneRestDirs: Map<string, THREE.Vector3>;
   skeletonHelper: THREE.SkeletonHelper;
 }
 
 // Module-scope temps for bone driving — allocated once, reused every frame.
 const _bDir       = new THREE.Vector3();
-const _bTQ        = new THREE.Quaternion();
 const _bPQ        = new THREE.Quaternion();
 const _bYup       = new THREE.Vector3(0, 1, 0);
 const _qTorsoFull = new THREE.Quaternion();
@@ -628,14 +632,20 @@ export function RoomViewport({
         if (lm && (lm.visibility ?? 1) >= MIN_VIS) return lm;
         return o.persistPose ? (lm ?? null) : null;
       };
+      // Convert a smoothed pose-world landmark to Three.js space via the canonical
+      // transform from coordTransform.ts (Y-up, mirror applied).
+      const isMirror = mirrorRef.current;
       const RV = (i: number): THREE.Vector3 | null => {
         const lm = getLm(i);
-        return lm ? new THREE.Vector3(mx * lm.x, -lm.y, -lm.z) : null;
+        return lm ? mpWorldToThree(lm, isMirror) : null;
       };
       const RVm = (i: number, j: number): THREE.Vector3 | null => {
         const a = getLm(i), b = getLm(j);
         if (!a || !b) return null;
-        return new THREE.Vector3(mx * (a.x + b.x) / 2, -(a.y + b.y) / 2, -(a.z + b.z) / 2);
+        return mpWorldToThree(
+          { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 },
+          isMirror,
+        );
       };
       // Legs only: null out when the lower body isn't tracked → rest pose. The
       // legsRestOnLoss rule can disable this (legs then follow held landmarks,
@@ -964,19 +974,28 @@ export function RoomViewport({
         // Drive a bone so its local +Y = worldDir. Process root-first: after
         // setting each bone's quaternion, update matrix + matrixWorld so children
         // see a fresh parent matrixWorld when they compute their own local quat.
+        // Drive a bone so it points along worldDir.
+        // Implements worldDirToLocalQuat (see coordTransform.ts) inline using
+        // pre-allocated temps to avoid per-frame garbage.
+        // Drives root-to-tip: each call propagates matrixWorld so children read
+        // a correct parent transform when driven next.
         const driveBoneByDir = (joint: string, worldDir: THREE.Vector3) => {
           const bName = model.boneMap[joint];
           const bone = bName ? model.bones.get(bName) : undefined;
           if (!bone) return;
-          _bTQ.setFromUnitVectors(_bYup, worldDir);
+          // Bind-pose direction in parent-local space (from child position at load time).
+          const restDir = model.boneRestDirs.get(bName) ?? _bYup;
           if (bone.parent) {
+            // parentWorldInv → _bPQ
             bone.parent.getWorldQuaternion(_bPQ);
-            _bPQ.invert(); // parentWorldInv
-            // localQ = parentWorldInv * worldTarget  (NOT worldTarget * parentWorldInv)
-            bone.quaternion.copy(_bPQ).multiply(_bTQ);
+            _bPQ.invert();
+            // Convert world target direction to parent-local space.
+            _bDir.copy(worldDir).applyQuaternion(_bPQ).normalize();
           } else {
-            bone.quaternion.copy(_bTQ);
+            _bDir.copy(worldDir).normalize();
           }
+          // Rotate from the bind-pose direction to the target local direction.
+          bone.quaternion.setFromUnitVectors(restDir, _bDir);
           bone.updateMatrix();
           if (bone.parent) {
             bone.matrixWorld.multiplyMatrices(bone.parent.matrixWorld, bone.matrix);
@@ -1213,9 +1232,23 @@ export function RoomViewport({
         if (obj instanceof THREE.SkinnedMesh) obj.frustumCulled = false;
       });
 
-      // Store bind-pose local quaternions before any FK driving mutates them.
+      // Capture bind-pose data before any FK driving mutates the skeleton.
+      // boneRestQuats — local quaternions (for potential future delta FK).
+      // boneRestDirs  — direction each bone points in its parent's local space,
+      //                 derived from the first bone child's position. Used by
+      //                 driveBoneByDir so setFromUnitVectors starts from the
+      //                 correct rest orientation, not an assumed Y-up.
       const boneRestQuats = new Map<string, THREE.Quaternion>();
-      bones.forEach((bone, name) => boneRestQuats.set(name, bone.quaternion.clone()));
+      const boneRestDirs  = new Map<string, THREE.Vector3>();
+      bones.forEach((bone, name) => {
+        boneRestQuats.set(name, bone.quaternion.clone());
+        const firstBoneChild = bone.children.find(c => c instanceof THREE.Bone) as THREE.Bone | undefined;
+        if (firstBoneChild && firstBoneChild.position.lengthSq() > 1e-10) {
+          boneRestDirs.set(name, firstBoneChild.position.clone().normalize());
+        } else {
+          boneRestDirs.set(name, new THREE.Vector3(0, 1, 0));
+        }
+      });
 
       // Merge default Mixamo map with any sidecar overrides.
       let boneMap = { ...DEFAULT_BONE_MAP, ...(modelBoneMapRef.current ?? {}) };
@@ -1271,7 +1304,7 @@ export function RoomViewport({
         `— group.position will be set to Y=${(rigRef.current.hipHeightCm / 100 - hipsLocalY).toFixed(3)}m`,
       );
 
-      loadedModelRef.current = { group, bones, boneMap, hipsLocalY, boneRestQuats, skeletonHelper };
+      loadedModelRef.current = { group, bones, boneMap, hipsLocalY, boneRestQuats, boneRestDirs, skeletonHelper };
       console.log("[GLB] loadedModelRef set — model ready for rendering");
     }, undefined, (err) => {
       console.error("[GLB loader] load error:", err);

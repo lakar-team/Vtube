@@ -81,6 +81,7 @@ export function useMocap(
     face: null,
     pose: null,
     poseWorld: null,
+    poseWorldThree: null,
     leftHand: null,
     rightHand: null,
   });

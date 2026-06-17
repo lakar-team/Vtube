@@ -1,4 +1,5 @@
 import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
+import type { Vector3 } from "three";
 
 /** Euler rotation in radians, XYZ order (matches Kalidokit output). */
 export interface EulerRotation {
@@ -236,6 +237,12 @@ export interface DebugLandmarks {
    * NormalizedLandmark ({x,y,z,visibility}) but the units are meters, not [0,1].
    */
   poseWorld: NormalizedLandmark[] | null;
+  /**
+   * `poseWorld` converted to Three.js Y-up space via `mpWorldToThree`, with the
+   * current mirror flag applied. Ready for direct use by 3D drivers — no further
+   * coordinate conversion needed. Computed alongside `poseWorld` in kalidokitAdapter.
+   */
+  poseWorldThree: Vector3[] | null;
   leftHand: NormalizedLandmark[] | null;
   rightHand: NormalizedLandmark[] | null;
 }

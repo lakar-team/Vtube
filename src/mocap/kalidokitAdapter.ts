@@ -5,6 +5,7 @@ import type {
   PoseLandmarkerResult,
 } from "@mediapipe/tasks-vision";
 import { Face, Hand, Pose } from "kalidokit";
+import { mpWorldToThree } from "./coordTransform";
 import {
   ARKIT_BLENDSHAPE_NAMES,
   emptyFrame,
@@ -216,7 +217,7 @@ export function solveMocapFrame(
   { mirror, trackLegs, t }: SolveOptions,
 ): SolveResult {
   const frame = emptyFrame(t);
-  const debug: DebugLandmarks = { face: null, pose: null, poseWorld: null, leftHand: null, rightHand: null };
+  const debug: DebugLandmarks = { face: null, pose: null, poseWorld: null, poseWorldThree: null, leftHand: null, rightHand: null };
 
   // Wrist up/down (z) from the pose solver — it sees the whole forearm so
   // it's steadier than the hand solver's palm-plane estimate. Captured in the
@@ -333,6 +334,9 @@ export function solveMocapFrame(
     debug.pose = poseImage;
     // Metric world landmarks (meters, hip-origin) for the planned 3D Room View.
     debug.poseWorld = poseWorld as unknown as NormalizedLandmark[];
+    // Pre-converted to Three.js Y-up space with mirror applied — downstream
+    // drivers read these directly without any further coordinate conversion.
+    debug.poseWorldThree = poseWorld.map(lm => mpWorldToThree(lm, mirror));
 
     // Tracking confidence: mean visibility of the upper-body joints we use.
     let vis = 0;
