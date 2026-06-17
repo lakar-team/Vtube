@@ -285,6 +285,8 @@ export interface RuleFlags {
   useCustomModel: boolean;
   /** Apply ARKit blendshapes to the GLB model's face mesh (disable for helmets/robots). */
   useModelFace: boolean;
+  /** Overlay a SkeletonHelper (bone lines) on the loaded GLB model. */
+  showModelBones: boolean;
 }
 
 export const DEFAULT_RULES: RuleFlags = {
@@ -297,6 +299,7 @@ export const DEFAULT_RULES: RuleFlags = {
   showEyes: true,
   useCustomModel: false,
   useModelFace: true,
+  showModelBones: false,
 };
 
 export interface RoomViewportProps {
@@ -324,6 +327,7 @@ interface LoadedModel {
   boneMap: Record<string, string>;
   hipsLocalY: number;
   boneRestQuats: Map<string, THREE.Quaternion>;
+  skeletonHelper: THREE.SkeletonHelper;
 }
 
 // Module-scope temps for bone driving — allocated once, reused every frame.
@@ -952,6 +956,8 @@ export function RoomViewport({
             figure.position.z,
           );
         }
+        // SkeletonHelper visibility — updated here; geometry sync happens after FK.
+        model.skeletonHelper.visible = useModel && rls.showModelBones;
       }
 
       if (useModel && model) {
@@ -1047,6 +1053,8 @@ export function RoomViewport({
         model.group.traverse((obj) => {
           if (obj instanceof THREE.SkinnedMesh) obj.skeleton.update();
         });
+        // Sync SkeletonHelper line geometry to the now-driven bone matrixWorlds.
+        if (model.skeletonHelper.visible) model.skeletonHelper.update();
 
         // ── blendshapes (52 ARKit values → GLB morph targets) ────────────
         if (rls.useModelFace) {
@@ -1106,6 +1114,9 @@ export function RoomViewport({
       figureRef.current = null;
       const lm = loadedModelRef.current;
       if (lm) {
+        lm.skeletonHelper.parent?.remove(lm.skeletonHelper);
+        lm.skeletonHelper.geometry.dispose();
+        (lm.skeletonHelper.material as THREE.Material).dispose();
         lm.group.parent?.remove(lm.group);
         lm.group.traverse((obj) => {
           if (obj instanceof THREE.Mesh) {
@@ -1126,6 +1137,9 @@ export function RoomViewport({
       // No URL: remove any existing model from the scene.
       const old = loadedModelRef.current;
       if (old) {
+        old.skeletonHelper.parent?.remove(old.skeletonHelper);
+        old.skeletonHelper.geometry.dispose();
+        (old.skeletonHelper.material as THREE.Material).dispose();
         old.group.parent?.remove(old.group);
         old.group.traverse((obj) => {
           if (obj instanceof THREE.Mesh) {
@@ -1155,6 +1169,9 @@ export function RoomViewport({
       // Remove + dispose previous model.
       const old = loadedModelRef.current;
       if (old) {
+        old.skeletonHelper.parent?.remove(old.skeletonHelper);
+        old.skeletonHelper.geometry.dispose();
+        (old.skeletonHelper.material as THREE.Material).dispose();
         old.group.parent?.remove(old.group);
         old.group.traverse((obj) => {
           if (obj instanceof THREE.Mesh) {
@@ -1225,6 +1242,12 @@ export function RoomViewport({
       scene.add(group);
       group.updateMatrixWorld(true);
 
+      // SkeletonHelper draws coloured lines connecting every bone joint.
+      // Hidden by default; toggled live by the showModelBones rule flag.
+      const skeletonHelper = new THREE.SkeletonHelper(group);
+      skeletonHelper.visible = false;
+      scene.add(skeletonHelper);
+
       // Y offset: position model so hips bone sits at figure's hip origin.
       // Use getWorldPosition after scene.add() to account for intermediate parents.
       const hipsKey = boneMap["mixamorigHips"] ?? "";
@@ -1248,7 +1271,7 @@ export function RoomViewport({
         `— group.position will be set to Y=${(rigRef.current.hipHeightCm / 100 - hipsLocalY).toFixed(3)}m`,
       );
 
-      loadedModelRef.current = { group, bones, boneMap, hipsLocalY, boneRestQuats };
+      loadedModelRef.current = { group, bones, boneMap, hipsLocalY, boneRestQuats, skeletonHelper };
       console.log("[GLB] loadedModelRef set — model ready for rendering");
     }, undefined, (err) => {
       console.error("[GLB loader] load error:", err);
