@@ -1042,16 +1042,40 @@ export function RoomViewport({
       group.traverse((obj) => {
         if (obj instanceof THREE.Bone) bones.set(obj.name, obj);
       });
+      console.log(`[GLB] loaded ${bones.size} bones`);
+
+      // Disable frustum culling on all skinned meshes — the rest-pose bbox
+      // is wrong after FK drives bones outside the bind pose.
+      group.traverse((obj) => {
+        if (obj instanceof THREE.SkinnedMesh) obj.frustumCulled = false;
+      });
 
       // Merge default Mixamo map with any sidecar overrides.
-      const boneMap = { ...DEFAULT_BONE_MAP, ...(modelBoneMapRef.current ?? {}) };
+      let boneMap = { ...DEFAULT_BONE_MAP, ...(modelBoneMapRef.current ?? {}) };
 
-      // Y offset so the hips bone sits at figure-local Y = 0 (hip height).
-      const hipsBone = bones.get(boneMap.hips ?? "");
-      const hipsLocalY = hipsBone ? hipsBone.position.y * scl : 0;
+      // Auto-detect Mixamo colon naming convention (mixamorig:Hips vs mixamorigHips).
+      // Newer Mixamo exports prefix every bone name with "mixamorig:" (colon).
+      if (!bones.has("mixamorigHips") && bones.has("mixamorig:Hips")) {
+        console.log("[GLB] detected colon bone naming (mixamorig:Hips), rewriting map");
+        const rewritten: Record<string, string> = {};
+        for (const [joint, boneName] of Object.entries(boneMap)) {
+          rewritten[joint] = boneName.replace(/^mixamorig(?!:)/, "mixamorig:");
+        }
+        boneMap = rewritten;
+      } else {
+        console.log("[GLB] bone naming convention: mixamorigHips (no colon)");
+      }
 
-      group.updateMatrixWorld(true);
+      // Add to scene first so getWorldPosition reflects final scale + hierarchy.
       scene.add(group);
+      group.updateMatrixWorld(true);
+
+      // Y offset: position model so hips bone sits at figure's hip origin.
+      // Use getWorldPosition after scene.add() to account for intermediate parents.
+      const hipsBone = bones.get(boneMap.hips ?? "");
+      console.log(`[GLB] hips bone "${boneMap.hips}" found: ${!!hipsBone}`);
+      const _tmpVec = new THREE.Vector3();
+      const hipsLocalY = hipsBone ? hipsBone.getWorldPosition(_tmpVec).y : 0;
 
       loadedModelRef.current = { group, bones, boneMap, hipsLocalY };
     }, undefined, (err) => {
