@@ -6,7 +6,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import type { DebugLandmarks, MocapFrame } from "../mocap/types";
 import type { RigConfig } from "../mocap/rig";
-import { mpWorldToThree } from "../mocap/coordTransform";
+import { buildCanonicalPose, lmHandDir, worldDirToBoneLocal } from "../mocap/worldFrame";
 import { FACE_CONTOURS, FACE_TRIANGLES } from "./faceMeshData";
 import {
   DEFAULT_BONE_MAP, FINGER_LM_PAIRS, FINGER_BONES_L, FINGER_BONES_R,
@@ -210,7 +210,6 @@ interface LoadedModel {
 
 // Module-scope temps for bone driving — allocated once, reused every frame.
 const _bDir       = new THREE.Vector3();
-const _bPQ        = new THREE.Quaternion();
 const _bYup       = new THREE.Vector3(0, 1, 0);
 const _qTorsoFull = new THREE.Quaternion();
 const _qSpinePart = new THREE.Quaternion();
@@ -500,61 +499,33 @@ export function RoomViewport({
       const visOk = (i: number) => { const l = pw?.[i]; return !!l && (l.visibility ?? 1) >= MIN_VIS; };
       const legsTracked = visOk(HIP_L) && visOk(HIP_R) && visOk(KN_L) && visOk(KN_R);
 
-      const getLm = (i: number): NormalizedLandmark | null => {
-        const lm = pw?.[i];
-        if (lm && (lm.visibility ?? 1) >= MIN_VIS) return lm;
-        return o.persistPose ? (lm ?? null) : null;
-      };
-      // Convert a smoothed pose-world landmark to Three.js space via the canonical
-      // transform from coordTransform.ts (Y-up, mirror applied).
-      const isMirror = mirrorRef.current;
-      const RV = (i: number): THREE.Vector3 | null => {
-        const lm = getLm(i);
-        return lm ? mpWorldToThree(lm, isMirror) : null;
-      };
-      const RVm = (i: number, j: number): THREE.Vector3 | null => {
-        const a = getLm(i), b = getLm(j);
-        if (!a || !b) return null;
-        return mpWorldToThree(
-          { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 },
-          isMirror,
-        );
-      };
-      // Legs only: null out when the lower body isn't tracked → rest pose. The
-      // legsRestOnLoss rule can disable this (legs then follow held landmarks,
-      // which may curl/fetal — useful to see the rule's effect).
-      const RVleg = (i: number): THREE.Vector3 | null =>
-        (rls.legsRestOnLoss && !legsTracked ? null : RV(i));
-      // Live direction a→b (unit), or the rest-pose fallback direction when missing.
-      const dir = (a: THREE.Vector3 | null, b: THREE.Vector3 | null, fallback: THREE.Vector3): THREE.Vector3 =>
-        a && b ? b.clone().sub(a).normalize() : fallback;
-      const ext = (from: THREE.Vector3, d: THREE.Vector3, cm: number): THREE.Vector3 =>
-        from.clone().addScaledVector(d, len(cm));
+      const pose = pw ? buildCanonicalPose(pw, mx) : null;
 
       // ── forward-kinematics skeleton: fixed lengths/radii, live directions ──
-      const hipMid = new THREE.Vector3(0, 0, 0);
-      const shMid = ext(hipMid, dir(RVm(HIP_L, HIP_R), RVm(SH_L, SH_R), D_UP), rig.torsoCm);
-      const headDir = RVm(EAR_L, EAR_R) ? dir(RVm(SH_L, SH_R), RVm(EAR_L, EAR_R), D_UP)
-        : dir(RVm(SH_L, SH_R), RV(NOSE), D_UP);
-      const headC = ext(shMid, headDir, rig.neckCm);
+      const hipMid   = new THREE.Vector3(0, 0, 0);
+      const torsoDir = pose ? pose.shMid.clone().sub(pose.hipMid).normalize() : D_UP;
+      const shMid    = hipMid.clone().addScaledVector(torsoDir, len(rig.torsoCm));
+      const headDir  = pose ? pose.headC.clone().sub(pose.shMid).normalize() : D_UP;
+      const headC    = shMid.clone().addScaledVector(headDir, len(rig.neckCm));
 
-      const shAxis = dir(RV(SH_L), RV(SH_R), D_X);
-      const hipAxis = dir(RV(HIP_L), RV(HIP_R), D_X);
-      const shL = shMid.clone().addScaledVector(shAxis, -len(rig.shoulderWidthCm) / 2);
-      const shR = shMid.clone().addScaledVector(shAxis,  len(rig.shoulderWidthCm) / 2);
+      const shAxis  = pose ? pose.shR.clone().sub(pose.shL).normalize()   : D_X;
+      const hipAxis = pose ? pose.hipR.clone().sub(pose.hipL).normalize() : D_X;
+      const shL  = shMid.clone().addScaledVector(shAxis,  -len(rig.shoulderWidthCm) / 2);
+      const shR  = shMid.clone().addScaledVector(shAxis,   len(rig.shoulderWidthCm) / 2);
       const hipL = hipMid.clone().addScaledVector(hipAxis, -len(rig.hipWidthCm) / 2);
       const hipR = hipMid.clone().addScaledVector(hipAxis,  len(rig.hipWidthCm) / 2);
 
-      const elL = ext(shL, dir(RV(SH_L), RV(EL_L), D_UARM_REST_L), rig.upperArmCm);
-      const elR = ext(shR, dir(RV(SH_R), RV(EL_R), D_UARM_REST_R), rig.upperArmCm);
-      const wrL = ext(elL, dir(RV(EL_L), RV(WR_L), D_LARM_REST_L), rig.lowerArmCm);
-      const wrR = ext(elR, dir(RV(EL_R), RV(WR_R), D_LARM_REST_R), rig.lowerArmCm);
-      const knL = ext(hipL, dir(RVleg(HIP_L), RVleg(KN_L), D_DOWN), rig.upperLegCm);
-      const knR = ext(hipR, dir(RVleg(HIP_R), RVleg(KN_R), D_DOWN), rig.upperLegCm);
-      const anL = ext(knL, dir(RVleg(KN_L), RVleg(AN_L), D_DOWN), rig.lowerLegCm);
-      const anR = ext(knR, dir(RVleg(KN_R), RVleg(AN_R), D_DOWN), rig.lowerLegCm);
-      const toeL = ext(anL, dir(RVleg(AN_L), RVleg(TOE_L), D_FOOT), rig.footCm);
-      const toeR = ext(anR, dir(RVleg(AN_R), RVleg(TOE_R), D_FOOT), rig.footCm);
+      const elL  = shL.clone().addScaledVector(pose ? pose.elL.clone().sub(pose.shL).normalize()   : D_UARM_REST_L, len(rig.upperArmCm));
+      const elR  = shR.clone().addScaledVector(pose ? pose.elR.clone().sub(pose.shR).normalize()   : D_UARM_REST_R, len(rig.upperArmCm));
+      const wrL  = elL.clone().addScaledVector(pose ? pose.wrL.clone().sub(pose.elL).normalize()   : D_LARM_REST_L, len(rig.lowerArmCm));
+      const wrR  = elR.clone().addScaledVector(pose ? pose.wrR.clone().sub(pose.elR).normalize()   : D_LARM_REST_R, len(rig.lowerArmCm));
+      const legPose = (rls.legsRestOnLoss && !legsTracked) ? null : pose;
+      const knL  = hipL.clone().addScaledVector(legPose ? legPose.knL.clone().sub(legPose.hipL).normalize() : D_DOWN, len(rig.upperLegCm));
+      const knR  = hipR.clone().addScaledVector(legPose ? legPose.knR.clone().sub(legPose.hipR).normalize() : D_DOWN, len(rig.upperLegCm));
+      const anL  = knL.clone().addScaledVector(legPose ? legPose.anL.clone().sub(legPose.knL).normalize()  : D_DOWN, len(rig.lowerLegCm));
+      const anR  = knR.clone().addScaledVector(legPose ? legPose.anR.clone().sub(legPose.knR).normalize()  : D_DOWN, len(rig.lowerLegCm));
+      const toeL = anL.clone().addScaledVector(legPose ? legPose.toeL.clone().sub(legPose.anL).normalize() : D_FOOT, len(rig.footCm));
+      const toeR = anR.clone().addScaledVector(legPose ? legPose.toeR.clone().sub(legPose.anR).normalize() : D_FOOT, len(rig.footCm));
 
       const headR = Math.max(len(rig.headDiameterCm) * 0.65, 0.04);
       const jR = len(rig.jointRcm);
@@ -731,11 +702,7 @@ export function RoomViewport({
         jp[0] = wrist.clone();
         for (let k = 0; k < 20; k++) {
           const [a, b] = HAND_BONES[k];
-          const d = new THREE.Vector3(
-            mx * (lm[b].x - lm[a].x),
-            -(lm[b].y - lm[a].y),
-            -(lm[b].z - lm[a].z),
-          ).normalize();
+          const d = lmHandDir(lm[a], lm[b], mx);
           const fi = HAND_BONE_FINGER[k];
           const mul = fi >= 0 ? fingerMul[fi] : 1;
           jp[b] = jp[a].clone().addScaledVector(d, HAND_BONE_FRAC[k] * mul * handLenM);
@@ -844,31 +811,14 @@ export function RoomViewport({
       }
 
       if (useModel && model) {
-        // Drive a bone so its local +Y = worldDir. Process root-first: after
-        // setting each bone's quaternion, update matrix + matrixWorld so children
-        // see a fresh parent matrixWorld when they compute their own local quat.
-        // Drive a bone so it points along worldDir.
-        // Implements worldDirToLocalQuat (see coordTransform.ts) inline using
-        // pre-allocated temps to avoid per-frame garbage.
-        // Drives root-to-tip: each call propagates matrixWorld so children read
-        // a correct parent transform when driven next.
+        // Drive a bone to point along worldDir — root-first, propagating matrixWorld
+        // so children read a correct parent transform when driven next.
         const driveBoneByDir = (joint: string, worldDir: THREE.Vector3) => {
           const bName = model.boneMap[joint];
           const bone = bName ? model.bones.get(bName) : undefined;
           if (!bone) return;
-          // Bind-pose direction in parent-local space (from child position at load time).
           const restDir = model.boneRestDirs.get(bName) ?? _bYup;
-          if (bone.parent) {
-            // parentWorldInv → _bPQ
-            bone.parent.getWorldQuaternion(_bPQ);
-            _bPQ.invert();
-            // Convert world target direction to parent-local space.
-            _bDir.copy(worldDir).applyQuaternion(_bPQ).normalize();
-          } else {
-            _bDir.copy(worldDir).normalize();
-          }
-          // Rotate from the bind-pose direction to the target local direction.
-          bone.quaternion.setFromUnitVectors(restDir, _bDir);
+          bone.quaternion.copy(worldDirToBoneLocal(worldDir, bone, restDir));
           bone.updateMatrix();
           if (bone.parent) {
             bone.matrixWorld.multiplyMatrices(bone.parent.matrixWorld, bone.matrix);
@@ -892,17 +842,16 @@ export function RoomViewport({
         model.group.updateMatrixWorld(true);
 
         // ── spine (3 bones, weighted slerp: 20% / 55% / 100%) ────────────
-        const torsoD = dir(hipMid, shMid, D_UP);
-        _qTorsoFull.setFromUnitVectors(_bYup, torsoD);
+        _qTorsoFull.setFromUnitVectors(_bYup, torsoDir);
         _qSpinePart.slerpQuaternions(_qIdent, _qTorsoFull, 0.20);
         driveBoneByDir("mixamorigSpine",  _spineD.copy(_bYup).applyQuaternion(_qSpinePart));
         _qSpinePart.slerpQuaternions(_qIdent, _qTorsoFull, 0.55);
         driveBoneByDir("mixamorigSpine1", _spineD.copy(_bYup).applyQuaternion(_qSpinePart));
-        driveBoneByDir("mixamorigSpine2", torsoD);
+        driveBoneByDir("mixamorigSpine2", torsoDir);
 
         // ── neck / head ───────────────────────────────────────────────────
         driveBone("mixamorigNeck", shMid, headC, D_UP);
-        driveBone("mixamorigHead", headC, ext(headC, headDir, rig.headDiameterCm * 0.5), headDir);
+        driveBone("mixamorigHead", headC, headC.clone().addScaledVector(headDir, len(rig.headDiameterCm * 0.5)), headDir);
 
         // ── shoulders (clavicles) ─────────────────────────────────────────
         driveBone("mixamorigLeftShoulder",  shMid, shL, D_UARM_REST_L);
@@ -929,11 +878,7 @@ export function RoomViewport({
           if (!lm || lm.length < 21) return;
           for (let f = 0; f < 15; f++) {
             const [ia, ib] = FINGER_LM_PAIRS[f];
-            _fingerD.set(
-              mx * (lm[ib].x - lm[ia].x),
-              -(lm[ib].y - lm[ia].y),
-              -(lm[ib].z - lm[ia].z),
-            );
+            _fingerD.copy(lmHandDir(lm[ia], lm[ib], mx));
             if (_fingerD.lengthSq() < 1e-9) continue;
             driveBoneByDir(names[f], _fingerD.normalize());
           }

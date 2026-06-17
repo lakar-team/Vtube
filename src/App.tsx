@@ -12,6 +12,7 @@ import {
   captureRigConfig, loadRigConfig, saveRigConfig,
   DEFAULT_RIG, type RigConfig, type RigNumKey,
 } from "./mocap/rig";
+import { lmFaceCentered } from "./mocap/worldFrame";
 
 type DisplayMode = "room" | "tuner" | "rules" | "facemesh";
 const DISPLAY_MODE_KEY = "vtube.displayMode";
@@ -260,27 +261,17 @@ export default function App() {
       mpn = fw > 1e-4 ? headM / fw : 1;
     }
     const fScale = mpn * rig.faceScale;
-    type V = { x: number; y: number; z: number };
-    const rv = (i: number): V => ({
-      x: mx * (face[i].x - cx) * fScale,
-      y: -(face[i].y - cy) * fScale,
-      z: -(face[i].z - cz) * fScale,
-    });
-    const sub = (a: V, b: V): V => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z });
-    const dot = (a: V, b: V) => a.x * b.x + a.y * b.y + a.z * b.z;
-    const norm = (a: V): V => { const l = Math.hypot(a.x, a.y, a.z) || 1; return { x: a.x / l, y: a.y / l, z: a.z / l }; };
-    const cross = (a: V, b: V): V => ({ x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x });
-    const up = sub(rv(10), rv(152));
-    const side = sub(rv(454), rv(234));
-    let F = norm(cross(side, up));
-    if (F.z < 0) F = { x: -F.x, y: -F.y, z: -F.z };
-    const U = norm(sub(up, { x: F.x * dot(up, F), y: F.y * dot(up, F), z: F.z * dot(up, F) }));
-    let R = norm(cross(U, F));
-    if (dot(R, side) < 0) R = { x: -R.x, y: -R.y, z: -R.z };
+    const rv = (i: number) => lmFaceCentered(face[i], cx, cy, cz, mx, fScale);
+    const up   = rv(10).sub(rv(152));
+    const side = rv(454).sub(rv(234));
+    let F = side.clone().cross(up).normalize();
+    if (F.z < 0) F.negate();
+    const U = up.clone().addScaledVector(F, -up.dot(F)).normalize();
+    let R = U.clone().cross(F).normalize();
+    if (R.dot(side) < 0) R.negate();
     const eyeLocal = (a: number, b: number) => {
-      const ea = rv(a), eb = rv(b);
-      const c: V = { x: (ea.x + eb.x) / 2, y: (ea.y + eb.y) / 2, z: (ea.z + eb.z) / 2 };
-      return { x: dot(c, R), y: dot(c, U), z: dot(c, F) };
+      const c = rv(a).add(rv(b)).multiplyScalar(0.5);
+      return { x: c.dot(R), y: c.dot(U), z: c.dot(F) };
     };
     const L = eyeLocal(362, 263); // left eye inner/outer corners
     const Re = eyeLocal(33, 133); // right eye outer/inner corners
