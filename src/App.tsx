@@ -77,7 +77,9 @@ function loadSmoothAmount(): number {
 }
 
 export default function App() {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const videoRef    = useRef<HTMLVideoElement | null>(null);
+  const glbInputRef = useRef<HTMLInputElement | null>(null);
+  const jsonInputRef = useRef<HTMLInputElement | null>(null);
 
   const [mirror, setMirror] = useState(true);
   const [showOverlay, setShowOverlay] = useState(true);
@@ -111,6 +113,13 @@ export default function App() {
   };
   const [countdown, setCountdown] = useState<number | null>(null);
   const captureTimerRef = useRef<number | null>(null);
+
+  const [modelUrl, setModelUrl] = useState<string | null>(null);
+  const [modelBoneMapOverride, setModelBoneMapOverride] = useState<Record<string, string> | null>(null);
+  // Revoke the object URL when it changes or on unmount to avoid memory leaks.
+  useEffect(() => {
+    return () => { if (modelUrl) URL.revokeObjectURL(modelUrl); };
+  }, [modelUrl]);
 
   const webcam = useWebcam(videoRef);
   const mocap = useMocap(videoRef, {
@@ -149,6 +158,7 @@ export default function App() {
   // Rules Inspector: persistence/smoothing reuse the existing header state; the
   // behavioural rules drive RoomViewport via the `rules` flags.
   const ruleToggles: RuleToggleItem[] = [
+    { key: "useCustomModel", label: "use custom 3D model", value: rules.useCustomModel, onToggle: (v) => setRule("useCustomModel", v) },
     { key: "posePersistence", label: "pose persistence", value: persistPose, onToggle: (v) => setBoolPersisted("vtube.persistPose", setPersistPose, v) },
     { key: "handPersistence", label: "hand persistence", value: persistHands, onToggle: (v) => setBoolPersisted("vtube.persistHands", setPersistHands, v) },
     { key: "facePersistence", label: "face persistence", value: persistFace, onToggle: (v) => setBoolPersisted("vtube.persistFace", setPersistFace, v) },
@@ -370,6 +380,57 @@ export default function App() {
           >
             {countdown !== null ? `capturing… ${countdown}` : "capture scale"}
           </button>
+          <button
+            type="button"
+            className="capture-btn"
+            onClick={() => glbInputRef.current?.click()}
+            title="Load a GLB/GLTF character model with a Mixamo-compatible skeleton. Toggle it on in the Rules Inspector."
+          >
+            {modelUrl ? "replace model" : "load model"}
+          </button>
+          <input
+            ref={glbInputRef}
+            type="file"
+            accept=".glb,.gltf"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (!f) return;
+              if (modelUrl) URL.revokeObjectURL(modelUrl);
+              setModelUrl(URL.createObjectURL(f));
+              e.target.value = "";
+            }}
+          />
+          {modelUrl && (
+            <>
+              <button
+                type="button"
+                className="capture-btn"
+                onClick={() => jsonInputRef.current?.click()}
+                title="Load a JSON bone-name map: { &quot;hips&quot;: &quot;BoneName&quot;, … } for non-Mixamo skeletons."
+              >
+                bone map (.json)
+              </button>
+              <input
+                ref={jsonInputRef}
+                type="file"
+                accept=".json"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (!f) return;
+                  f.text().then((t) => {
+                    try {
+                      setModelBoneMapOverride(JSON.parse(t) as Record<string, string>);
+                    } catch {
+                      console.warn("[bone map] invalid JSON");
+                    }
+                  });
+                  e.target.value = "";
+                }}
+              />
+            </>
+          )}
           <span className="toggle persist-group" title="Hold the last-known landmarks briefly when tracking drops, instead of snapping to default.">
             persist:
             <label className="mini"><input type="checkbox" checked={persistPose} onChange={(e) => setBoolPersisted("vtube.persistPose", setPersistPose, e.target.checked)} /> pose</label>
@@ -408,6 +469,8 @@ export default function App() {
               roomM={roomM}
               lmOpts={lmOpts}
               rules={rules}
+              modelUrl={modelUrl}
+              modelBoneMapOverride={modelBoneMapOverride}
             />
           </section>
         )}

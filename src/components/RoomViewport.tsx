@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import type { MutableRefObject } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import type { DebugLandmarks, MocapFrame } from "../mocap/types";
 import type { RigConfig } from "../mocap/rig";
@@ -96,6 +97,29 @@ const D_LARM_REST_R = new THREE.Vector3( 0.28, -0.96, 0.02).normalize();
 // Palm-fan metacarpal bones (wrist/knuckle web): NOT drawn as thin cylinders —
 // the palm is rendered as one flattened box instead. Keyed by HAND_BONES index.
 const PALM_FAN_BONES = new Set<number>([4, 8, 12, 16]);
+
+// Default bone name mapping: vtube joint name → Mixamo GLB bone name.
+// Users can override with a sidecar .json (same keys, custom bone names).
+const DEFAULT_BONE_MAP: Record<string, string> = {
+  hips:      "mixamorigHips",
+  torso:     "mixamorigSpine2",
+  neck:      "mixamorigNeck",
+  head:      "mixamorigHead",
+  shoulderL: "mixamorigLeftShoulder",
+  upperArmL: "mixamorigLeftArm",
+  lowerArmL: "mixamorigLeftForeArm",
+  wristL:    "mixamorigLeftHand",
+  shoulderR: "mixamorigRightShoulder",
+  upperArmR: "mixamorigRightArm",
+  lowerArmR: "mixamorigRightForeArm",
+  wristR:    "mixamorigRightHand",
+  upperLegL: "mixamorigLeftUpLeg",
+  lowerLegL: "mixamorigLeftLeg",
+  ankleL:    "mixamorigLeftFoot",
+  upperLegR: "mixamorigRightUpLeg",
+  lowerLegR: "mixamorigRightLeg",
+  ankleR:    "mixamorigRightFoot",
+};
 
 // Eyelid-ring landmarks, ordered around each eye (lower lid then upper lid), used
 // to build a smooth almond eye SOCKET (triangle fan) rather than a jagged
@@ -197,6 +221,8 @@ export interface RuleFlags {
   showFaceMesh: boolean;
   /** Draw the eyeballs + irises. */
   showEyes: boolean;
+  /** Drive the loaded GLB model instead of the procedural skeleton. */
+  useCustomModel: boolean;
 }
 
 export const DEFAULT_RULES: RuleFlags = {
@@ -207,6 +233,7 @@ export const DEFAULT_RULES: RuleFlags = {
   cheekHingeNorm: true,
   showFaceMesh: true,
   showEyes: true,
+  useCustomModel: false,
 };
 
 export interface RoomViewportProps {
@@ -222,7 +249,24 @@ export interface RoomViewportProps {
   lmOpts: LandmarkOptions;
   /** Behavioural processing rules (Rules Inspector toggles). */
   rules?: RuleFlags;
+  /** Object URL for a loaded GLB/GLTF file to drive instead of the procedural skeleton. */
+  modelUrl?: string | null;
+  /** Overrides for the default Mixamo bone name map. Keys = vtube joint names. */
+  modelBoneMapOverride?: Record<string, string> | null;
 }
+
+interface LoadedModel {
+  group: THREE.Group;
+  bones: Map<string, THREE.Bone>;
+  boneMap: Record<string, string>;
+  hipsLocalY: number;
+}
+
+// Module-scope temps for bone driving — allocated once, reused every frame.
+const _bDir = new THREE.Vector3();
+const _bTQ  = new THREE.Quaternion();
+const _bPQ  = new THREE.Quaternion();
+const _bYup = new THREE.Vector3(0, 1, 0);
 
 export function RoomViewport({
   debugLandmarksRef,
@@ -232,6 +276,8 @@ export function RoomViewport({
   roomM,
   lmOpts,
   rules = DEFAULT_RULES,
+  modelUrl,
+  modelBoneMapOverride,
 }: RoomViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mirrorRef = useRef(mirror);
@@ -244,6 +290,13 @@ export function RoomViewport({
   lmOptsRef.current = lmOpts;
   const rulesRef = useRef(rules);
   rulesRef.current = rules;
+
+  // GLB model loading state — bridged between the scene effect and the load effect.
+  const sceneRef           = useRef<THREE.Scene | null>(null);
+  const figureRef          = useRef<THREE.Group | null>(null);
+  const loadedModelRef     = useRef<LoadedModel | null>(null);
+  const modelBoneMapRef    = useRef(modelBoneMapOverride ?? null);
+  modelBoneMapRef.current  = modelBoneMapOverride ?? null;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -258,6 +311,7 @@ export function RoomViewport({
     container.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
+    sceneRef.current = scene;
 
     const camera = new THREE.PerspectiveCamera(45, w0 / h0, 0.05, 500);
     const r0 = roomMRef.current || ROOM_DEFAULT;
@@ -290,6 +344,7 @@ export function RoomViewport({
     const matC = new THREE.MeshLambertMaterial({ color: 0xd4b080 }); // tan  = centre
 
     const figure = new THREE.Group();
+    figureRef.current = figure;
     scene.add(figure);
 
     const mHead  = makeSph(matC);
@@ -803,6 +858,81 @@ export function RoomViewport({
       placeEye(mEyeL, mIrisL, -1);
       placeEye(mEyeR, mIrisR, 1);
 
+      // ── GLB model: lives as a direct scene child (not in figure) so that
+      //    setting figure.visible = false hides the procedural skeleton cleanly.
+      //    FK direction vectors are the same in world space as in figure-local
+      //    space because figure only translates (identity rotation).
+      const model = loadedModelRef.current;
+      const useModel = rls.useCustomModel && model !== null;
+
+      // Show procedural skeleton XOR GLB model.
+      figure.visible = !useModel;
+      if (model) {
+        model.group.visible = useModel;
+        if (useModel) {
+          // Keep model hips aligned with FK hip position (figure.position in world).
+          model.group.position.set(
+            figure.position.x,
+            figure.position.y - model.hipsLocalY,
+            figure.position.z,
+          );
+        }
+      }
+
+      if (useModel && model) {
+        // Drive a Mixamo bone so its local +Y points along `dir` in world space.
+        // Assumes Mixamo convention: each bone's local +Y = parent-to-child axis.
+        // Process in root-first order — after setting each bone's quaternion,
+        // manually update its matrix and matrixWorld so children get a fresh
+        // parent matrixWorld when they compute their own local quaternion.
+        const driveBone = (
+          joint: string,
+          a: THREE.Vector3 | null,
+          b: THREE.Vector3 | null,
+          fallback: THREE.Vector3,
+        ) => {
+          const bName = model.boneMap[joint];
+          const bone = bName ? model.bones.get(bName) : undefined;
+          if (!bone) return;
+          const dir = (a && b && _bDir.subVectors(b, a).lengthSq() > 1e-8)
+            ? _bDir.subVectors(b, a).normalize()
+            : fallback;
+          _bTQ.setFromUnitVectors(_bYup, dir);
+          if (bone.parent) {
+            bone.parent.getWorldQuaternion(_bPQ);
+            bone.quaternion.copy(_bPQ.invert()).premultiply(_bTQ);
+          } else {
+            bone.quaternion.copy(_bTQ);
+          }
+          bone.updateMatrix();
+          if (bone.parent) {
+            bone.matrixWorld.multiplyMatrices(bone.parent.matrixWorld, bone.matrix);
+          }
+        };
+
+        // ── root → tip order ─────────────────────────────────────
+        driveBone("torso",     hipMid, shMid,   D_UP);
+        driveBone("neck",      shMid,  headC,   D_UP);
+        driveBone("head",      headC,  ext(headC, headDir, rig.headDiameterCm * 0.5), headDir);
+
+        driveBone("shoulderL", shMid, shL, D_UARM_REST_L);
+        driveBone("shoulderR", shMid, shR, D_UARM_REST_R);
+
+        driveBone("upperArmL", shL,  elL,  D_UARM_REST_L);
+        driveBone("upperArmR", shR,  elR,  D_UARM_REST_R);
+        driveBone("lowerArmL", elL,  wrL,  D_LARM_REST_L);
+        driveBone("lowerArmR", elR,  wrR,  D_LARM_REST_R);
+        driveBone("wristL",    elL,  wrL,  D_LARM_REST_L);
+        driveBone("wristR",    elR,  wrR,  D_LARM_REST_R);
+
+        driveBone("upperLegL", hipL, knL,  D_DOWN);
+        driveBone("upperLegR", hipR, knR,  D_DOWN);
+        driveBone("lowerLegL", knL,  anL,  D_DOWN);
+        driveBone("lowerLegR", knR,  anR,  D_DOWN);
+        driveBone("ankleL",    anL,  toeL, D_FOOT);
+        driveBone("ankleR",    anR,  toeR, D_FOOT);
+      }
+
       renderer.render(scene, camera);
     });
 
@@ -839,9 +969,99 @@ export function RoomViewport({
         for (const b of h.bones) b.geometry.dispose();
         h.palm.geometry.dispose();
       }
+      sceneRef.current = null;
+      figureRef.current = null;
+      const lm = loadedModelRef.current;
+      if (lm) {
+        lm.group.parent?.remove(lm.group);
+        lm.group.traverse((obj) => {
+          if (obj instanceof THREE.Mesh) {
+            obj.geometry.dispose();
+            (Array.isArray(obj.material) ? obj.material : [obj.material])
+              .forEach((mat) => (mat as THREE.Material).dispose());
+          }
+        });
+        loadedModelRef.current = null;
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debugLandmarksRef]);
+
+  // ── GLB model loader ──────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!modelUrl) {
+      // No URL: remove any existing model from the scene.
+      const old = loadedModelRef.current;
+      if (old) {
+        old.group.parent?.remove(old.group);
+        old.group.traverse((obj) => {
+          if (obj instanceof THREE.Mesh) {
+            obj.geometry.dispose();
+            (Array.isArray(obj.material) ? obj.material : [obj.material])
+              .forEach((mat) => (mat as THREE.Material).dispose());
+          }
+        });
+        loadedModelRef.current = null;
+      }
+      return;
+    }
+
+    const scene = sceneRef.current;
+    if (!scene) return;
+
+    let cancelled = false;
+    const loader = new GLTFLoader();
+
+    loader.load(modelUrl, (gltf) => {
+      if (cancelled) return;
+
+      // Remove + dispose previous model.
+      const old = loadedModelRef.current;
+      if (old) {
+        old.group.parent?.remove(old.group);
+        old.group.traverse((obj) => {
+          if (obj instanceof THREE.Mesh) {
+            obj.geometry.dispose();
+            (Array.isArray(obj.material) ? obj.material : [obj.material])
+              .forEach((mat) => (mat as THREE.Material).dispose());
+          }
+        });
+      }
+
+      const group = gltf.scene;
+
+      // Scale to match user's captured height.
+      const box = new THREE.Box3().setFromObject(group);
+      const modelHeight = box.max.y - box.min.y;
+      const targetHeight = rigRef.current.heightCm / 100;
+      const scl = modelHeight > 0.01 ? targetHeight / modelHeight : 1;
+      group.scale.setScalar(scl);
+
+      // Collect all bones by name.
+      const bones = new Map<string, THREE.Bone>();
+      group.traverse((obj) => {
+        if (obj instanceof THREE.Bone) bones.set(obj.name, obj);
+      });
+
+      // Merge default Mixamo map with any sidecar overrides.
+      const boneMap = { ...DEFAULT_BONE_MAP, ...(modelBoneMapRef.current ?? {}) };
+
+      // Y offset so the hips bone sits at figure-local Y = 0 (hip height).
+      const hipsBone = bones.get(boneMap.hips ?? "");
+      const hipsLocalY = hipsBone ? hipsBone.position.y * scl : 0;
+
+      group.updateMatrixWorld(true);
+      scene.add(group);
+
+      loadedModelRef.current = { group, bones, boneMap, hipsLocalY };
+    }, undefined, (err) => {
+      console.error("[GLB loader]", err);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [modelUrl]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div ref={containerRef} className="avatar-viewport">
