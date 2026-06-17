@@ -7,6 +7,7 @@ import { RulesInspector, type RuleToggleItem } from "./components/RulesInspector
 import { DebugHUD } from "./components/DebugHUD";
 import { useWebcam } from "./hooks/useWebcam";
 import { useMocap } from "./mocap/useMocap";
+import { DEFAULT_PERF, type PerfOptions } from "./mocap/landmarkers";
 import {
   captureRigConfig, loadRigConfig, saveRigConfig,
   DEFAULT_RIG, type RigConfig, type RigNumKey,
@@ -31,6 +32,16 @@ function loadRules(): RuleFlags {
     return raw ? { ...DEFAULT_RULES, ...(JSON.parse(raw) as Partial<RuleFlags>) } : { ...DEFAULT_RULES };
   } catch {
     return { ...DEFAULT_RULES };
+  }
+}
+
+const PERF_KEY = "vtube.perf";
+function loadPerf(): PerfOptions {
+  try {
+    const raw = localStorage.getItem(PERF_KEY);
+    return raw ? { ...DEFAULT_PERF, ...(JSON.parse(raw) as Partial<PerfOptions>) } : { ...DEFAULT_PERF };
+  } catch {
+    return { ...DEFAULT_PERF };
   }
 }
 
@@ -90,6 +101,14 @@ export default function App() {
       return next;
     });
   };
+  const [perf, setPerf] = useState<PerfOptions>(loadPerf);
+  const setPerfFlag = (k: keyof PerfOptions, v: boolean) => {
+    setPerf((prev) => {
+      const next = { ...prev, [k]: v };
+      try { localStorage.setItem(PERF_KEY, JSON.stringify(next)); } catch { /* privacy mode */ }
+      return next;
+    });
+  };
   const [countdown, setCountdown] = useState<number | null>(null);
   const captureTimerRef = useRef<number | null>(null);
 
@@ -99,6 +118,7 @@ export default function App() {
     trackLegs,
     enabled: webcam.ready,
     heightCm,
+    perf,
   });
 
   const changeDisplayMode = (v: DisplayMode) => {
@@ -140,6 +160,13 @@ export default function App() {
     { key: "cheekHingeNorm", label: "face cheek-hinge normalization", value: rules.cheekHingeNorm, onToggle: (v) => setRule("cheekHingeNorm", v) },
     { key: "showFaceMesh", label: "face surface mesh", value: rules.showFaceMesh, onToggle: (v) => setRule("showFaceMesh", v) },
     { key: "showEyes", label: "eyeballs", value: rules.showEyes, onToggle: (v) => setRule("showEyes", v) },
+    // ── performance (reinitialises the trackers on delegate change) ──
+    { key: "faceGpu", label: "perf · face landmarker GPU delegate", value: perf.faceGpu, onToggle: (v) => setPerfFlag("faceGpu", v) },
+    { key: "faceWasmSimd", label: "perf · face landmarker WASM SIMD (when GPU off)", value: perf.faceWasmSimd, onToggle: (v) => setPerfFlag("faceWasmSimd", v) },
+    { key: "poseGpu", label: "perf · pose landmarker GPU delegate", value: perf.poseGpu, onToggle: (v) => setPerfFlag("poseGpu", v) },
+    { key: "handsGpu", label: "perf · hands landmarker GPU delegate", value: perf.handsGpu, onToggle: (v) => setPerfFlag("handsGpu", v) },
+    { key: "faceCap30", label: "perf · face inference 30fps cap", value: perf.faceCap30, onToggle: (v) => setPerfFlag("faceCap30", v) },
+    { key: "poseCap30", label: "perf · pose inference 30fps cap", value: perf.poseCap30, onToggle: (v) => setPerfFlag("poseCap30", v) },
   ];
 
   // ── one-time scale capture: 5s countdown, then snapshot proportions once.

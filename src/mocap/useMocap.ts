@@ -5,7 +5,7 @@ import type {
   HandLandmarkerResult,
   PoseLandmarkerResult,
 } from "@mediapipe/tasks-vision";
-import { createLandmarkers, type Landmarkers } from "./landmarkers";
+import { createLandmarkers, DEFAULT_PERF, type Landmarkers, type PerfOptions } from "./landmarkers";
 import { solveMocapFrame } from "./kalidokitAdapter";
 import { directSmoothFrame, FilterBank } from "./smoothing";
 import { updateBodyCalibration, type BodyCalibration } from "./bodyCalibration";
@@ -20,6 +20,9 @@ export interface MocapState {
   faceConfidence: number;
   poseConfidence: number;
   legsConfidence: number;
+  /** Set when the Face GPU delegate is on but returns no detections (a known
+   *  silent-failure mode on some systems) — shown as a clear warning. */
+  faceDelegateError: string | null;
 }
 
 export interface UseMocapResult {
@@ -41,6 +44,7 @@ const INITIAL_STATE: MocapState = {
   faceConfidence: 0,
   poseConfidence: 0,
   legsConfidence: 0,
+  faceDelegateError: null,
 };
 
 /**
@@ -66,8 +70,11 @@ export function useMocap(
     enabled: boolean;
     /** User's real standing height (cm) — anchors metric body calibration. */
     heightCm: number;
+    /** Delegate + inference-rate performance options. */
+    perf?: PerfOptions;
   },
 ): UseMocapResult {
+  const perf = options.perf ?? DEFAULT_PERF;
   const frameRef = useRef<MocapFrame | null>(null);
   const rawFrameRef = useRef<MocapFrame | null>(null);
   const debugLandmarksRef = useRef<DebugLandmarks>({
@@ -88,7 +95,14 @@ export function useMocap(
   trackLegsRef.current = options.trackLegs;
   const heightCmRef = useRef(options.heightCm);
   heightCmRef.current = options.heightCm;
+  // Caps are read live in the loop (no landmarker rebuild); delegates are not.
+  const perfRef = useRef(perf);
+  perfRef.current = perf;
   const bankRef = useRef<FilterBank>(new FilterBank());
+
+  // Changing any delegate requires rebuilding the landmarkers — key the effect
+  // on just those flags so flipping a cap (read live) does NOT reinitialise.
+  const delegateKey = `${perf.faceGpu}|${perf.faceWasmSimd}|${perf.poseGpu}|${perf.handsGpu}`;
 
   useEffect(() => {
     if (!options.enabled) return;
@@ -100,10 +114,15 @@ export function useMocap(
     let frameCount = 0;
     let fpsWindowStart = performance.now();
     let fps = 0;
+    // For the inference caps: hold the last result on skipped frames.
+    let lastFaceResult: FaceLandmarkerResult | null = null;
+    let lastPoseResult: PoseLandmarkerResult | null = null;
+    let infFrame = 0;
+    let faceZeroStreak = 0;
 
     setState((s) => ({ ...s, status: "loading", error: null }));
 
-    createLandmarkers()
+    createLandmarkers(perfRef.current)
       .then((lm) => {
         if (cancelled) {
           lm.close();
@@ -135,20 +154,32 @@ export function useMocap(
       lastVideoTime = video.currentTime;
 
       const nowMs = performance.now();
+      const perfNow = perfRef.current;
+      infFrame++;
+      // 30fps caps: run face/pose inference every other camera frame, reusing the
+      // last result in between (render stays at full rate). Hands run every frame.
+      const runFace = !perfNow.faceCap30 || lastFaceResult === null || infFrame % 2 === 0;
+      const runPose = !perfNow.poseCap30 || lastPoseResult === null || infFrame % 2 === 0;
 
-      let faceResult: FaceLandmarkerResult | null = null;
-      let poseResult: PoseLandmarkerResult | null = null;
       let handResult: HandLandmarkerResult | null = null;
       try {
-        faceResult = landmarkers.face.detectForVideo(video, nowMs);
-        // Pose/hand get a strictly-increasing timestamp too; sharing nowMs of
-        // the same frame is fine because they are independent task instances.
-        poseResult = landmarkers.pose.detectForVideo(video, nowMs);
+        // Each landmarker is an independent task instance, so sharing nowMs (a
+        // strictly-increasing timestamp) across them is fine.
+        if (runFace) lastFaceResult = landmarkers.face.detectForVideo(video, nowMs);
+        if (runPose) lastPoseResult = landmarkers.pose.detectForVideo(video, nowMs);
         handResult = landmarkers.hand.detectForVideo(video, nowMs);
       } catch (err) {
         // A single failed inference shouldn't kill the loop.
         console.warn("mediapipe detect error", err);
         return;
+      }
+      const faceResult = lastFaceResult;
+      const poseResult = lastPoseResult;
+
+      // Watch for the GPU-delegate "0 detections" silent failure on the face model.
+      if (runFace) {
+        const faces = faceResult?.faceLandmarks?.length ?? 0;
+        faceZeroStreak = perfNow.faceGpu && faces === 0 ? faceZeroStreak + 1 : 0;
       }
 
       const { frame: raw, debug } = solveMocapFrame(faceResult, poseResult, handResult, video, {
@@ -179,6 +210,9 @@ export function useMocap(
           faceConfidence: raw.confidence.face,
           poseConfidence: raw.confidence.pose,
           legsConfidence: raw.confidence.legs,
+          faceDelegateError: faceZeroStreak > 45
+            ? "Face GPU delegate returned 0 detections — turn “Face GPU” off (use CPU/WASM)."
+            : null,
         }));
       }
     }
@@ -189,8 +223,9 @@ export function useMocap(
       landmarkers?.close();
       landmarkers = null;
     };
+    // delegateKey rebuilds the landmarkers when a GPU/WASM toggle flips.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [options.enabled, videoRef]);
+  }, [options.enabled, videoRef, delegateKey]);
 
   return {
     frameRef,

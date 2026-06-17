@@ -46,23 +46,52 @@ export interface Landmarkers {
   close: () => void;
 }
 
-export async function createLandmarkers(): Promise<Landmarkers> {
+/**
+ * Performance options — delegate choices + inference frame-rate caps, surfaced
+ * as live toggles in the Rules Inspector so the user can A/B which combo tracks
+ * fastest on their machine.
+ *
+ * On the delegates: MediaPipe Tasks-Vision (web) only exposes "GPU" vs "CPU".
+ * "CPU" IS the WebAssembly path (SIMD auto-selected when the browser supports
+ * it), so `faceWasmSimd` is the explicit WASM-CPU choice used whenever the GPU
+ * toggle is off — they can't both apply (GPU wins). Re-toggling it reinitialises
+ * the face model, which also clears a wedged GPU delegate.
+ */
+export interface PerfOptions {
+  faceGpu: boolean;
+  faceWasmSimd: boolean;
+  poseGpu: boolean;
+  handsGpu: boolean;
+  /** Run FaceLandmarker inference every other camera frame (≈30fps). */
+  faceCap30: boolean;
+  /** Run PoseLandmarker inference every other camera frame (≈30fps). */
+  poseCap30: boolean;
+}
+
+export const DEFAULT_PERF: PerfOptions = {
+  faceGpu: false,      // CPU/WASM is the reliable default for the face model (see below)
+  faceWasmSimd: true,
+  poseGpu: true,
+  handsGpu: true,
+  faceCap30: false,
+  poseCap30: false,
+};
+
+export async function createLandmarkers(perf: PerfOptions): Promise<Landmarkers> {
   const fileset = await FilesetResolver.forVisionTasks(WASM_BASE);
+  // GPU wins over WASM-SIMD when both are set; otherwise CPU (= WASM).
+  const faceDelegate = perf.faceGpu ? "GPU" : "CPU";
 
   const [face, pose, hand] = await Promise.all([
     FaceLandmarker.createFromOptions(fileset, {
       baseOptions: {
         modelAssetPath: FACE_MODEL_URL,
-        // Force CPU for the face model. On some GPUs/browsers the face model
-        // with blendshapes silently returns 0 faces on the GPU delegate — and
-        // because it's silent (init succeeds, inference just yields an empty
-        // result) MediaPipe's GPU→CPU auto-fallback never triggers. Leaving the
-        // delegate unset let auto-select pick GPU and hit exactly that trap:
-        // pose/hands (GPU) tracked fine while the face produced no landmarks,
-        // so the skeleton viewport's face overlay never appeared. CPU is the
-        // reliable path; for a single face the few-ms cost is well worth it
-        // (face landmarks + blendshapes are the feature this app depends on).
-        delegate: "CPU",
+        // NOTE: on some GPUs/browsers the face model with blendshapes silently
+        // returns 0 faces on the GPU delegate (init succeeds, inference yields an
+        // empty result, and MediaPipe's GPU→CPU auto-fallback never triggers).
+        // CPU/WASM is the reliable default; the GPU toggle lets the user try it,
+        // and useMocap surfaces a clear warning if it returns no detections.
+        delegate: faceDelegate,
       },
       runningMode: "VIDEO",
       numFaces: 1,
@@ -79,7 +108,7 @@ export async function createLandmarkers(): Promise<Landmarkers> {
     PoseLandmarker.createFromOptions(fileset, {
       baseOptions: {
         modelAssetPath: POSE_MODEL_URL,
-        delegate: "GPU",
+        delegate: perf.poseGpu ? "GPU" : "CPU",
       },
       runningMode: "VIDEO",
       numPoses: 1,
@@ -90,7 +119,7 @@ export async function createLandmarkers(): Promise<Landmarkers> {
     HandLandmarker.createFromOptions(fileset, {
       baseOptions: {
         modelAssetPath: HAND_MODEL_URL,
-        delegate: "GPU",
+        delegate: perf.handsGpu ? "GPU" : "CPU",
       },
       runningMode: "VIDEO",
       numHands: 2,

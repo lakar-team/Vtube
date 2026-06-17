@@ -226,9 +226,10 @@ export function DebugHUD({
           </tr>
         </tbody>
       </table>
-      {state.error && (
+      {(state.error || state.faceDelegateError) && (
         <div className="hud-notes">
-          <div className="hud-error">{state.error}</div>
+          {state.faceDelegateError && <div className="hud-warning">{state.faceDelegateError}</div>}
+          {state.error && <div className="hud-error">{state.error}</div>}
         </div>
       )}
     </div>
