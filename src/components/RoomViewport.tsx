@@ -323,6 +323,7 @@ interface LoadedModel {
   bones: Map<string, THREE.Bone>;
   boneMap: Record<string, string>;
   hipsLocalY: number;
+  boneRestQuats: Map<string, THREE.Quaternion>;
 }
 
 // Module-scope temps for bone driving — allocated once, reused every frame.
@@ -964,13 +965,17 @@ export function RoomViewport({
           _bTQ.setFromUnitVectors(_bYup, worldDir);
           if (bone.parent) {
             bone.parent.getWorldQuaternion(_bPQ);
-            bone.quaternion.copy(_bPQ.invert()).premultiply(_bTQ);
+            _bPQ.invert(); // parentWorldInv
+            // localQ = parentWorldInv * worldTarget  (NOT worldTarget * parentWorldInv)
+            bone.quaternion.copy(_bPQ).multiply(_bTQ);
           } else {
             bone.quaternion.copy(_bTQ);
           }
           bone.updateMatrix();
           if (bone.parent) {
             bone.matrixWorld.multiplyMatrices(bone.parent.matrixWorld, bone.matrix);
+          } else {
+            bone.matrixWorld.copy(bone.matrix);
           }
         };
         const driveBone = (
@@ -984,6 +989,9 @@ export function RoomViewport({
             : fallback;
           driveBoneByDir(joint, d);
         };
+
+        // Propagate group's current position into bone world matrices before driving.
+        model.group.updateMatrixWorld(true);
 
         // ── spine (3 bones, weighted slerp: 20% / 55% / 100%) ────────────
         const torsoD = dir(hipMid, shMid, D_UP);
@@ -1034,6 +1042,11 @@ export function RoomViewport({
         };
         driveFingers(dataForL, FINGER_BONES_L);
         driveFingers(dataForR, FINGER_BONES_R);
+
+        // Recompute GPU-side bone matrices after all FK is applied.
+        model.group.traverse((obj) => {
+          if (obj instanceof THREE.SkinnedMesh) obj.skeleton.update();
+        });
 
         // ── blendshapes (52 ARKit values → GLB morph targets) ────────────
         if (rls.useModelFace) {
@@ -1183,6 +1196,10 @@ export function RoomViewport({
         if (obj instanceof THREE.SkinnedMesh) obj.frustumCulled = false;
       });
 
+      // Store bind-pose local quaternions before any FK driving mutates them.
+      const boneRestQuats = new Map<string, THREE.Quaternion>();
+      bones.forEach((bone, name) => boneRestQuats.set(name, bone.quaternion.clone()));
+
       // Merge default Mixamo map with any sidecar overrides.
       let boneMap = { ...DEFAULT_BONE_MAP, ...(modelBoneMapRef.current ?? {}) };
 
@@ -1231,7 +1248,7 @@ export function RoomViewport({
         `— group.position will be set to Y=${(rigRef.current.hipHeightCm / 100 - hipsLocalY).toFixed(3)}m`,
       );
 
-      loadedModelRef.current = { group, bones, boneMap, hipsLocalY };
+      loadedModelRef.current = { group, bones, boneMap, hipsLocalY, boneRestQuats };
       console.log("[GLB] loadedModelRef set — model ready for rendering");
     }, undefined, (err) => {
       console.error("[GLB loader] load error:", err);
