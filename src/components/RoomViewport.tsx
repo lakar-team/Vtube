@@ -34,10 +34,7 @@ import { GlbBoneDriver, type FKPositions, type LoadedModel } from "../render/Glb
 const MIN_VIS = 0.5;
 const ROOM_DEFAULT = 2.5;
 
-const NOSE = 0, EAR_L = 7, EAR_R = 8;
-const SH_L = 11, SH_R = 12, EL_L = 13, EL_R = 14, WR_L = 15, WR_R = 16;
-const HIP_L = 23, HIP_R = 24, KN_L = 25, KN_R = 26, AN_L = 27, AN_R = 28;
-const TOE_L = 31, TOE_R = 32;
+const HIP_L = 23, HIP_R = 24, KN_L = 25, KN_R = 26;
 
 
 // Default directions in room space, used when a live direction is missing.
@@ -439,10 +436,8 @@ export function RoomViewport({
         if (obj instanceof THREE.SkinnedMesh) obj.frustumCulled = false;
       });
 
-      const boneRestQuats = new Map<string, THREE.Quaternion>();
-      const boneRestDirs  = new Map<string, THREE.Vector3>();
+      const boneRestDirs = new Map<string, THREE.Vector3>();
       bones.forEach((bone, name) => {
-        boneRestQuats.set(name, bone.quaternion.clone());
         const firstBoneChild = bone.children.find(c => c instanceof THREE.Bone) as THREE.Bone | undefined;
         if (firstBoneChild && firstBoneChild.position.lengthSq() > 1e-10) {
           boneRestDirs.set(name, firstBoneChild.position.clone().normalize());
@@ -496,7 +491,7 @@ export function RoomViewport({
         `— group.position will be set to Y=${(rigRef.current.hipHeightCm / 100 - hipsLocalY).toFixed(3)}m`,
       );
 
-      loadedModelRef.current = { group, bones, boneMap, hipsLocalY, boneRestQuats, boneRestDirs, skeletonHelper };
+      loadedModelRef.current = { group, bones, boneMap, hipsLocalY, boneRestDirs, skeletonHelper };
       console.log("[GLB] loadedModelRef set — model ready for rendering");
     }, undefined, (err) => {
       console.error("[GLB loader] load error:", err);

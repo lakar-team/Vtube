@@ -24,9 +24,8 @@ export interface LoadedModel {
   group:          THREE.Group;
   bones:          Map<string, THREE.Bone>;
   boneMap:        Record<string, string>;
-  hipsLocalY:     number;
-  boneRestQuats:  Map<string, THREE.Quaternion>;
-  boneRestDirs:   Map<string, THREE.Vector3>;
+  hipsLocalY:   number;
+  boneRestDirs: Map<string, THREE.Vector3>;
   skeletonHelper: THREE.SkeletonHelper;
 }
 
