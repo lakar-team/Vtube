@@ -2,23 +2,11 @@ import * as THREE from 'three';
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision';
 import type { RigConfig } from '../mocap/rig';
 import type { RuleFlags } from '../components/RoomViewport';
-import type { CanonicalPose } from '../mocap/worldFrame';
+import type { FKPositions } from './GlbBoneDriver';
 import { lmHandDir } from '../mocap/worldFrame';
 import {
   HAND_BONES, HAND_BONE_FRAC, HAND_BONE_FINGER, HAND_BONE_R, PALM_FAN_BONES,
 } from '../mocap/boneMap';
-
-// Default rest-pose directions (figure-local space, Y-up).
-// Duplicated from RoomViewport intentionally — renderer is self-contained.
-// Phase 3c will consolidate when GlbBoneDriver is extracted.
-const D_UP   = new THREE.Vector3(0,  1,  0);
-const D_DOWN = new THREE.Vector3(0, -1,  0);
-const D_X    = new THREE.Vector3(1,  0,  0);
-const D_FOOT = new THREE.Vector3(0, -0.3, 1).normalize();
-const D_UARM_REST_L = new THREE.Vector3(-0.45, -0.89,  0).normalize();
-const D_UARM_REST_R = new THREE.Vector3( 0.45, -0.89,  0).normalize();
-const D_LARM_REST_L = new THREE.Vector3(-0.28, -0.96,  0.02).normalize();
-const D_LARM_REST_R = new THREE.Vector3( 0.28, -0.96,  0.02).normalize();
 
 const LIMB_TAPER     = 0.72;
 const HEAD_SPHERE_FIT = 0.72;
@@ -171,40 +159,14 @@ export class ProceduralSkeletonRenderer {
   }
 
   update(
-    pose: CanonicalPose | null,
-    legsTracked: boolean,
+    fk: FKPositions,
     rig: RigConfig,
     rules: RuleFlags,
     mx: number,
     dataForL: NormalizedLandmark[] | null,
     dataForR: NormalizedLandmark[] | null,
   ): void {
-    // FK — fixed lengths from rig, directions from canonical pose.
-    const hipMid   = new THREE.Vector3(0, 0, 0);
-    const torsoDir = pose ? pose.shMid.clone().sub(pose.hipMid).normalize() : D_UP;
-    const shMid    = hipMid.clone().addScaledVector(torsoDir, len(rig.torsoCm));
-    const headDir  = pose ? pose.headC.clone().sub(pose.shMid).normalize() : D_UP;
-    const headC    = shMid.clone().addScaledVector(headDir, len(rig.neckCm));
-
-    const shAxis  = pose ? pose.shR.clone().sub(pose.shL).normalize()   : D_X;
-    const hipAxis = pose ? pose.hipR.clone().sub(pose.hipL).normalize() : D_X;
-    const shL  = shMid.clone().addScaledVector(shAxis,   -len(rig.shoulderWidthCm) / 2);
-    const shR  = shMid.clone().addScaledVector(shAxis,    len(rig.shoulderWidthCm) / 2);
-    const hipL = hipMid.clone().addScaledVector(hipAxis,  -len(rig.hipWidthCm) / 2);
-    const hipR = hipMid.clone().addScaledVector(hipAxis,   len(rig.hipWidthCm) / 2);
-
-    const elL  = shL.clone().addScaledVector(pose ? pose.elL.clone().sub(pose.shL).normalize()   : D_UARM_REST_L, len(rig.upperArmCm));
-    const elR  = shR.clone().addScaledVector(pose ? pose.elR.clone().sub(pose.shR).normalize()   : D_UARM_REST_R, len(rig.upperArmCm));
-    const wrL  = elL.clone().addScaledVector(pose ? pose.wrL.clone().sub(pose.elL).normalize()   : D_LARM_REST_L, len(rig.lowerArmCm));
-    const wrR  = elR.clone().addScaledVector(pose ? pose.wrR.clone().sub(pose.elR).normalize()   : D_LARM_REST_R, len(rig.lowerArmCm));
-
-    const legPose = (rules.legsRestOnLoss && !legsTracked) ? null : pose;
-    const knL  = hipL.clone().addScaledVector(legPose ? legPose.knL.clone().sub(legPose.hipL).normalize() : D_DOWN, len(rig.upperLegCm));
-    const knR  = hipR.clone().addScaledVector(legPose ? legPose.knR.clone().sub(legPose.hipR).normalize() : D_DOWN, len(rig.upperLegCm));
-    const anL  = knL.clone().addScaledVector(legPose ? legPose.anL.clone().sub(legPose.knL).normalize()  : D_DOWN, len(rig.lowerLegCm));
-    const anR  = knR.clone().addScaledVector(legPose ? legPose.anR.clone().sub(legPose.knR).normalize()  : D_DOWN, len(rig.lowerLegCm));
-    const toeL = anL.clone().addScaledVector(legPose ? legPose.toeL.clone().sub(legPose.anL).normalize() : D_FOOT, len(rig.footCm));
-    const toeR = anR.clone().addScaledVector(legPose ? legPose.toeR.clone().sub(legPose.anR).normalize() : D_FOOT, len(rig.footCm));
+    const { hipMid, shMid, headC, shL, shR, hipL, hipR, elL, elR, wrL, wrR, knL, knR, anL, anR, toeL, toeR } = fk;
 
     const headR = Math.max(len(rig.headDiameterCm) * 0.65, 0.04);
     const jR    = len(rig.jointRcm);

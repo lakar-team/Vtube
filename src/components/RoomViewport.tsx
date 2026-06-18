@@ -6,12 +6,11 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import type { DebugLandmarks, MocapFrame } from "../mocap/types";
 import type { RigConfig } from "../mocap/rig";
-import { buildCanonicalPose, lmHandDir, worldDirToBoneLocal } from "../mocap/worldFrame";
-import {
-  DEFAULT_BONE_MAP, FINGER_LM_PAIRS, FINGER_BONES_L, FINGER_BONES_R,
-} from "../mocap/boneMap";
+import { buildCanonicalPose } from "../mocap/worldFrame";
+import { DEFAULT_BONE_MAP } from "../mocap/boneMap";
 import { ProceduralSkeletonRenderer } from "../render/ProceduralSkeletonRenderer";
 import { FaceMeshRenderer } from "../render/FaceMeshRenderer";
+import { GlbBoneDriver, type FKPositions, type LoadedModel } from "../render/GlbBoneDriver";
 
 /**
  * VIEWPORT: 3D Room View (right pane) — Performance View.
@@ -120,26 +119,6 @@ export interface RoomViewportProps {
   modelBoneMapOverride?: Record<string, string> | null;
 }
 
-interface LoadedModel {
-  group: THREE.Group;
-  bones: Map<string, THREE.Bone>;
-  boneMap: Record<string, string>;
-  hipsLocalY: number;
-  boneRestQuats: Map<string, THREE.Quaternion>;
-  /** Direction each bone points in its parent's local space at bind pose. */
-  boneRestDirs: Map<string, THREE.Vector3>;
-  skeletonHelper: THREE.SkeletonHelper;
-}
-
-// Module-scope temps for GLB bone driving — allocated once, reused every frame.
-const _bDir       = new THREE.Vector3();
-const _bYup       = new THREE.Vector3(0, 1, 0);
-const _qTorsoFull = new THREE.Quaternion();
-const _qSpinePart = new THREE.Quaternion();
-const _qIdent     = new THREE.Quaternion(); // stays identity (0,0,0,1)
-const _spineD     = new THREE.Vector3();
-const _fingerD    = new THREE.Vector3();
-
 export function RoomViewport({
   debugLandmarksRef,
   frameRef,
@@ -217,6 +196,7 @@ export function RoomViewport({
 
     const skelRenderer = new ProceduralSkeletonRenderer(figure);
     const faceRenderer = new FaceMeshRenderer(figure);
+    const glbDriver    = new GlbBoneDriver();
 
     // ── per-stream persistence (hold-last-good) + EMA smoothing ──
     interface LmProc { held: NormalizedLandmark[] | null; sm: NormalizedLandmark[] | null; }
@@ -306,6 +286,11 @@ export function RoomViewport({
       const toeL = anL.clone().addScaledVector(legPose ? legPose.toeL.clone().sub(legPose.anL).normalize() : D_FOOT, len(rig.footCm));
       const toeR = anR.clone().addScaledVector(legPose ? legPose.toeR.clone().sub(legPose.anR).normalize() : D_FOOT, len(rig.footCm));
 
+      const fk: FKPositions = {
+        hipMid, torsoDir, shMid, headDir, headC,
+        shL, shR, hipL, hipR, elL, elR, wrL, wrR, knL, knR, anL, anR, toeL, toeR,
+      };
+
       // ── face + eyes (delegated to FaceMeshRenderer) ──────────────────
       const face = procLm(faceProc, debugLandmarksRef.current.face, o.persistFace, o.smoothing, alpha);
       faceRenderer.update(face, headC, rig, rls, mx, frameRef.current?.pupil);
@@ -316,7 +301,7 @@ export function RoomViewport({
       const dataForL = mirrorRef.current ? rStream : lStream;
       const dataForR = mirrorRef.current ? lStream : rStream;
 
-      skelRenderer.update(pose, legsTracked, rig, rls, mx, dataForL, dataForR);
+      skelRenderer.update(fk, rig, rls, mx, dataForL, dataForR);
 
       // ── GLB model: lives as a direct scene child (not in figure) so that
       //    setting figure.visible = false hides the procedural skeleton cleanly.
@@ -326,103 +311,10 @@ export function RoomViewport({
       figure.visible = !useModel;
       if (model) {
         model.group.visible = useModel;
-        if (useModel) {
-          model.group.position.set(
-            figure.position.x,
-            figure.position.y - model.hipsLocalY,
-            figure.position.z,
-          );
-        }
         model.skeletonHelper.visible = useModel && rls.showModelBones;
       }
-
       if (useModel && model) {
-        const driveBoneByDir = (joint: string, worldDir: THREE.Vector3) => {
-          const bName = model.boneMap[joint];
-          const bone = bName ? model.bones.get(bName) : undefined;
-          if (!bone) return;
-          const restDir = model.boneRestDirs.get(bName) ?? _bYup;
-          bone.quaternion.copy(worldDirToBoneLocal(worldDir, bone, restDir));
-          bone.updateMatrix();
-          if (bone.parent) {
-            bone.matrixWorld.multiplyMatrices(bone.parent.matrixWorld, bone.matrix);
-          } else {
-            bone.matrixWorld.copy(bone.matrix);
-          }
-        };
-        const driveBone = (
-          joint: string,
-          a: THREE.Vector3 | null,
-          b: THREE.Vector3 | null,
-          fallback: THREE.Vector3,
-        ) => {
-          const d = (a && b && _bDir.subVectors(b, a).lengthSq() > 1e-8)
-            ? _bDir.subVectors(b, a).normalize()
-            : fallback;
-          driveBoneByDir(joint, d);
-        };
-
-        model.group.updateMatrixWorld(true);
-
-        _qTorsoFull.setFromUnitVectors(_bYup, torsoDir);
-        _qSpinePart.slerpQuaternions(_qIdent, _qTorsoFull, 0.20);
-        driveBoneByDir("mixamorigSpine",  _spineD.copy(_bYup).applyQuaternion(_qSpinePart));
-        _qSpinePart.slerpQuaternions(_qIdent, _qTorsoFull, 0.55);
-        driveBoneByDir("mixamorigSpine1", _spineD.copy(_bYup).applyQuaternion(_qSpinePart));
-        driveBoneByDir("mixamorigSpine2", torsoDir);
-
-        driveBone("mixamorigNeck", shMid, headC, D_UP);
-        driveBone("mixamorigHead", headC, headC.clone().addScaledVector(headDir, len(rig.headDiameterCm * 0.5)), headDir);
-
-        driveBone("mixamorigLeftShoulder",  shMid, shL, D_UARM_REST_L);
-        driveBone("mixamorigRightShoulder", shMid, shR, D_UARM_REST_R);
-
-        driveBone("mixamorigLeftArm",      shL, elL, D_UARM_REST_L);
-        driveBone("mixamorigRightArm",     shR, elR, D_UARM_REST_R);
-        driveBone("mixamorigLeftForeArm",  elL, wrL, D_LARM_REST_L);
-        driveBone("mixamorigRightForeArm", elR, wrR, D_LARM_REST_R);
-        driveBone("mixamorigLeftHand",     elL, wrL, D_LARM_REST_L);
-        driveBone("mixamorigRightHand",    elR, wrR, D_LARM_REST_R);
-
-        driveBone("mixamorigLeftUpLeg",  hipL, knL,  D_DOWN);
-        driveBone("mixamorigRightUpLeg", hipR, knR,  D_DOWN);
-        driveBone("mixamorigLeftLeg",    knL,  anL,  D_DOWN);
-        driveBone("mixamorigRightLeg",   knR,  anR,  D_DOWN);
-        driveBone("mixamorigLeftFoot",   anL,  toeL, D_FOOT);
-        driveBone("mixamorigRightFoot",  anR,  toeR, D_FOOT);
-
-        const driveFingers = (lm: NormalizedLandmark[] | null, names: readonly string[]) => {
-          if (!lm || lm.length < 21) return;
-          for (let f = 0; f < 15; f++) {
-            const [ia, ib] = FINGER_LM_PAIRS[f];
-            _fingerD.copy(lmHandDir(lm[ia], lm[ib], mx));
-            if (_fingerD.lengthSq() < 1e-9) continue;
-            driveBoneByDir(names[f], _fingerD.normalize());
-          }
-        };
-        driveFingers(dataForL, FINGER_BONES_L);
-        driveFingers(dataForR, FINGER_BONES_R);
-
-        model.group.traverse((obj) => {
-          if (obj instanceof THREE.SkinnedMesh) obj.skeleton.update();
-        });
-        if (model.skeletonHelper.visible) model.skeletonHelper.update();
-
-        if (rls.useModelFace) {
-          const expr = frameRef.current?.expressions;
-          if (expr) {
-            model.group.traverse((obj) => {
-              if (!(obj instanceof THREE.SkinnedMesh)) return;
-              const dict = obj.morphTargetDictionary;
-              const infl = obj.morphTargetInfluences;
-              if (!dict || !infl) return;
-              for (const [name, value] of Object.entries(expr)) {
-                const idx = dict[name];
-                if (idx !== undefined) infl[idx] = value as number;
-              }
-            });
-          }
-        }
+        glbDriver.update(model, figure.position, fk, rig, rls, mx, dataForL, dataForR, frameRef.current?.expressions);
       }
 
       renderer.render(scene, camera);
