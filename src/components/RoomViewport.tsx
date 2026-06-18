@@ -10,9 +10,9 @@ import { buildCanonicalPose, lmHandDir, worldDirToBoneLocal } from "../mocap/wor
 import { FACE_CONTOURS, FACE_TRIANGLES } from "./faceMeshData";
 import {
   DEFAULT_BONE_MAP, FINGER_LM_PAIRS, FINGER_BONES_L, FINGER_BONES_R,
-  HAND_BONES, HAND_BONE_FRAC, HAND_BONE_FINGER, HAND_BONE_R,
-  PALM_FAN_BONES, RIGHT_EYE_RING, LEFT_EYE_RING,
+  RIGHT_EYE_RING, LEFT_EYE_RING,
 } from "../mocap/boneMap";
+import { ProceduralSkeletonRenderer } from "../render/ProceduralSkeletonRenderer";
 
 /**
  * VIEWPORT: 3D Room View (right pane) — Performance View.
@@ -35,10 +35,8 @@ import {
 
 const MIN_VIS = 0.5;
 const ROOM_DEFAULT = 2.5;
-const LIMB_TAPER = 0.72;        // distal-end radius as a fraction of the proximal end
 const FACE_W_FIT = 0.92;        // rendered face width as a fraction of the head diameter (at faceScale 1)
 const FALLBACK_FACE_W = 0.13;   // constant cheek-hinge width used when cheekHingeNorm is OFF
-const HEAD_SPHERE_FIT = 0.72;   // visible head-sphere radius vs headR — shrunk so it sits BEHIND the eyes
 
 const NOSE = 0, EAR_L = 7, EAR_R = 8;
 const SH_L = 11, SH_R = 12, EL_L = 13, EL_R = 14, WR_L = 15, WR_R = 16;
@@ -61,70 +59,13 @@ const D_LARM_REST_L = new THREE.Vector3(-0.28, -0.96, 0.02).normalize();
 const D_LARM_REST_R = new THREE.Vector3( 0.28, -0.96, 0.02).normalize();
 
 
-// ─── shared temporaries ───────────────────────────────────────────────────
-const _v2 = new THREE.Vector3();
-const _q  = new THREE.Quaternion();
-const _Y  = new THREE.Vector3(0, 1, 0);
+// ─── shared temporaries (face section only) ──────────────────────────────
 const _fUp   = new THREE.Vector3();
 const _fSide = new THREE.Vector3();
 const _fN    = new THREE.Vector3();
-const _pU = new THREE.Vector3();
-const _pW = new THREE.Vector3();
-const _pR = new THREE.Vector3();
-const _pF = new THREE.Vector3();
-const _pC = new THREE.Vector3();
 const _v3a = new THREE.Vector3();
 const _v3b = new THREE.Vector3();
 const _v3c = new THREE.Vector3();
-const _hq = new THREE.Quaternion();
-
-/** Unit cylinder, optionally tapered: top (distal, +Y) radius = `taper` × bottom. */
-function makeCyl(mat: THREE.Material, taper = 1): THREE.Mesh {
-  return new THREE.Mesh(new THREE.CylinderGeometry(taper, 1, 1, 14, 1), mat);
-}
-function makeSph(mat: THREE.Material): THREE.Mesh {
-  return new THREE.Mesh(new THREE.SphereGeometry(1, 16, 10), mat);
-}
-
-/** Place a unit cylinder as a bone a→b with the given radius (meters). */
-function placeCyl(mesh: THREE.Mesh, a: THREE.Vector3 | null, b: THREE.Vector3 | null, radius: number): void {
-  if (!a || !b) { mesh.visible = false; return; }
-  const length = a.distanceTo(b);
-  if (length < 1e-4) { mesh.visible = false; return; }
-  mesh.visible = true;
-  mesh.position.addVectors(a, b).multiplyScalar(0.5);
-  _v2.subVectors(b, a).normalize();
-  _q.setFromUnitVectors(_Y, _v2);
-  mesh.quaternion.copy(_q);
-  mesh.scale.set(radius, length, radius);
-}
-/** Place a unit sphere at p with the given radius (meters). */
-function placeSph(mesh: THREE.Mesh, p: THREE.Vector3 | null, radius: number): void {
-  if (!p) { mesh.visible = false; return; }
-  mesh.visible = true;
-  mesh.position.copy(p);
-  mesh.scale.setScalar(radius);
-}
-const _m4 = new THREE.Matrix4();
-/** Place a unit box at `center`, oriented by an orthonormal basis (x,y,z), with
- *  full extents (sx,sy,sz) in meters. */
-function placeBox(
-  mesh: THREE.Mesh, center: THREE.Vector3,
-  x: THREE.Vector3, y: THREE.Vector3, z: THREE.Vector3,
-  sx: number, sy: number, sz: number,
-): void {
-  _m4.makeBasis(x, y, z);
-  mesh.quaternion.setFromRotationMatrix(_m4);
-  mesh.position.copy(center);
-  mesh.scale.set(sx, sy, sz);
-  mesh.visible = true;
-}
-
-interface HandRig {
-  joints: THREE.Mesh[];   // 21 small spheres (rounded knuckle/tip caps)
-  bones: THREE.Mesh[];    // 21 tapered cylinders, one per HAND_BONES entry
-  palm: THREE.Mesh;       // flattened box across the metacarpals
-}
 
 /** Landmark persistence (hold-last-good) + temporal smoothing options. */
 export interface LandmarkOptions {
@@ -288,43 +229,11 @@ export function RoomViewport({
     );
     scene.add(cube);
 
-    const matL = new THREE.MeshLambertMaterial({ color: 0x4477cc }); // blue = left
-    const matR = new THREE.MeshLambertMaterial({ color: 0xcc3344 }); // red  = right
-    const matC = new THREE.MeshLambertMaterial({ color: 0xd4b080 }); // tan  = centre
-
     const figure = new THREE.Group();
     figureRef.current = figure;
     scene.add(figure);
 
-    const mHead   = makeSph(matC);
-    const mNeck   = makeCyl(matC);
-    const mSpine  = makeCyl(matC);
-    const mSpine1 = makeCyl(matC);
-    const mSpine2 = makeCyl(matC);
-
-    // Limb cylinders taper toward the extremity for a more anatomical look.
-    const mUArmL = makeCyl(matL, LIMB_TAPER); const mUArmR = makeCyl(matR, LIMB_TAPER);
-    const mLArmL = makeCyl(matL, LIMB_TAPER); const mLArmR = makeCyl(matR, LIMB_TAPER);
-    const mHandL = makeSph(matL); const mHandR = makeSph(matR);
-    const mULegL = makeCyl(matL, LIMB_TAPER); const mULegR = makeCyl(matR, LIMB_TAPER);
-    const mLLegL = makeCyl(matL, LIMB_TAPER); const mLLegR = makeCyl(matR, LIMB_TAPER);
-    const mFootL = makeCyl(matL, LIMB_TAPER); const mFootR = makeCyl(matR, LIMB_TAPER);
-
-    const mJShL = makeSph(matL); const mJShR = makeSph(matR);
-    const mJElL = makeSph(matL); const mJElR = makeSph(matR);
-    const mJWrL = makeSph(matL); const mJWrR = makeSph(matR);
-    const mJHpL = makeSph(matL); const mJHpR = makeSph(matR);
-    const mJKnL = makeSph(matL); const mJKnR = makeSph(matR);
-    const mJAnL = makeSph(matL); const mJAnR = makeSph(matR);
-
-    const meshes: THREE.Mesh[] = [
-      mHead, mNeck, mSpine, mSpine1, mSpine2,
-      mUArmL, mLArmL, mHandL, mULegL, mLLegL, mFootL,
-      mUArmR, mLArmR, mHandR, mULegR, mLLegR, mFootR,
-      mJShL, mJElL, mJWrL, mJHpL, mJKnL, mJAnL,
-      mJShR, mJElR, mJWrR, mJHpR, mJKnR, mJAnR,
-    ];
-    for (const m of meshes) { m.visible = false; figure.add(m); }
+    const skelRenderer = new ProceduralSkeletonRenderer(figure);
 
     // Face: one shared 468-vertex position buffer feeds a SOLID, FULLY OPAQUE
     // triangle surface (FACE_TRIANGLES) — a true occluder. It is single-sided
@@ -391,22 +300,6 @@ export function RoomViewport({
     const socketL = makeSocket();
     const socketR = makeSocket();
 
-    // Fingers: tapered cylinder per bone + small spheres at the joints (rounded
-    // caps), using the skin-tinted limb material so the hand reads as one piece.
-    const makeHand = (mat: THREE.Material): HandRig => {
-      const joints = Array.from({ length: 21 }, () => {
-        const m = makeSph(mat); m.frustumCulled = false; m.visible = false; figure.add(m); return m;
-      });
-      const bones = Array.from({ length: HAND_BONES.length }, () => {
-        const m = makeCyl(mat, 0.7); m.frustumCulled = false; m.visible = false; figure.add(m); return m;
-      });
-      const palm = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat);
-      palm.frustumCulled = false; palm.visible = false; figure.add(palm);
-      return { joints, bones, palm };
-    };
-    const handLeft = makeHand(matL);
-    const handRight = makeHand(matR);
-
     // ── eyeballs (white) + irises (gaze-driven). DEPTH-TESTED + depth-writing:
     //    they sit recessed behind the face and show only through the stencil eye
     //    holes (the solid face occludes them elsewhere), and a hand passing in
@@ -455,20 +348,9 @@ export function RoomViewport({
 
     let disposed = false;
 
-    // Skin tone — recolour materials only when rig.skinHex changes. Head/neck/
-    // torso/face use the pure skin colour; limbs keep a 75/25 blue/red tint so
-    // the left/right cue survives.
+    // Skin tone — recolour materials only when rig.skinHex changes.
     let lastSkin = "";
     const _skin = new THREE.Color();
-    const _blue = new THREE.Color(0x4477cc);
-    const _red  = new THREE.Color(0xcc3344);
-    const applySkin = (hex: string) => {
-      _skin.set(hex);
-      matC.color.copy(_skin);
-      matFaceFill.color.copy(_skin);
-      matL.color.copy(_skin).lerp(_blue, 0.25);
-      matR.color.copy(_skin).lerp(_red, 0.25);
-    };
 
     renderer.setAnimationLoop(() => {
       if (disposed) return;
@@ -484,7 +366,12 @@ export function RoomViewport({
       const alpha = o.smoothing ? Math.max(0.04, 1 - o.smoothAmount) : 1;
       const pw = procLm(poseProc, debugLandmarksRef.current.poseWorld, o.persistPose, o.smoothing, alpha);
       const rig = rigRef.current;
-      if (rig.skinHex !== lastSkin) { lastSkin = rig.skinHex; applySkin(rig.skinHex); }
+      if (rig.skinHex !== lastSkin) {
+        lastSkin = rig.skinHex;
+        _skin.set(rig.skinHex);
+        matFaceFill.color.copy(_skin);
+        skelRenderer.applySkin(rig.skinHex);
+      }
       const mx = mirrorRef.current ? -1 : 1;
       const len = (cm: number) => cm / 100; // cm → meters
 
@@ -501,7 +388,9 @@ export function RoomViewport({
 
       const pose = pw ? buildCanonicalPose(pw, mx) : null;
 
-      // ── forward-kinematics skeleton: fixed lengths/radii, live directions ──
+      // ── forward-kinematics positions — fixed lengths, live directions ──
+      // (also consumed by the GLB driver below; skelRenderer re-derives them
+      //  internally so there is temporary duplication until Phase 3c)
       const hipMid   = new THREE.Vector3(0, 0, 0);
       const torsoDir = pose ? pose.shMid.clone().sub(pose.hipMid).normalize() : D_UP;
       const shMid    = hipMid.clone().addScaledVector(torsoDir, len(rig.torsoCm));
@@ -527,28 +416,8 @@ export function RoomViewport({
       const toeL = anL.clone().addScaledVector(legPose ? legPose.toeL.clone().sub(legPose.anL).normalize() : D_FOOT, len(rig.footCm));
       const toeR = anR.clone().addScaledVector(legPose ? legPose.toeR.clone().sub(legPose.anR).normalize() : D_FOOT, len(rig.footCm));
 
+      // headR used by both the face section and the eye placement below.
       const headR = Math.max(len(rig.headDiameterCm) * 0.65, 0.04);
-      const jR = len(rig.jointRcm);
-      const spine  = hipMid.clone().lerp(shMid, 1 / 3);
-      const spine1 = hipMid.clone().lerp(shMid, 2 / 3);
-      placeSph(mHead, headC, headR * HEAD_SPHERE_FIT);
-      placeCyl(mNeck,   headC, shMid,  len(rig.neckRcm));
-      placeCyl(mSpine,  hipMid, spine,  len(rig.torsoRcm));
-      placeCyl(mSpine1, spine,  spine1, len(rig.torsoRcm));
-      placeCyl(mSpine2, spine1, shMid,  len(rig.torsoRcm));
-
-      placeCyl(mUArmL, shL, elL, len(rig.upperArmRcm));  placeCyl(mUArmR, shR, elR, len(rig.upperArmRcm));
-      placeCyl(mLArmL, elL, wrL, len(rig.lowerArmRcm));  placeCyl(mLArmR, elR, wrR, len(rig.lowerArmRcm));
-      placeCyl(mULegL, hipL, knL, len(rig.upperLegRcm)); placeCyl(mULegR, hipR, knR, len(rig.upperLegRcm));
-      placeCyl(mLLegL, knL, anL, len(rig.lowerLegRcm));  placeCyl(mLLegR, knR, anR, len(rig.lowerLegRcm));
-      placeCyl(mFootL, anL, toeL, len(rig.footRcm));     placeCyl(mFootR, anR, toeR, len(rig.footRcm));
-
-      placeSph(mJShL, shL, jR);   placeSph(mJShR, shR, jR);
-      placeSph(mJElL, elL, jR);   placeSph(mJElR, elR, jR);
-      placeSph(mJWrL, wrL, jR);   placeSph(mJWrR, wrR, jR);
-      placeSph(mJHpL, hipL, jR);  placeSph(mJHpR, hipR, jR);
-      placeSph(mJKnL, knL, jR);   placeSph(mJKnR, knR, jR);
-      placeSph(mJAnL, anL, jR);   placeSph(mJAnR, anR, jR);
 
       // ── filled face surface (+ contour overlay) ──────────────────────────
       // FIXED SIZE — every term comes from RigConfig. The rendered face width is
@@ -660,17 +529,7 @@ export function RoomViewport({
         socketR.mesh.visible = false;
       }
 
-      // ── hands: fingers at the FK wrist, sized from the FIXED captured forearm.
-      // Closed-hand fallback ball sits just past the wrist along the forearm.
-      const fist = (wr: THREE.Vector3, el: THREE.Vector3): THREE.Vector3 =>
-        wr.clone().addScaledVector(_v2.subVectors(wr, el).normalize(), 0.03);
-      const handLenM = len(rig.handLengthCm);
-      const handR = len(rig.handRcm);
-      // Map each hand stream to the correct anatomical FK wrist using the
-      // chirality the adapter already resolved (handedness + geometric anchoring),
-      // accounting for the webcam mirror — NOT the live pose wrists, so a held or
-      // raised hand stays visible when the body leaves frame (hand persistence).
-      //
+      // ── hands: resolve streams then delegate to skelRenderer ─────────────
       // solveMocapFrame keys debug.leftHand/rightHand by AVATAR side: in mirror
       // mode debug.leftHand = the subject's RIGHT hand (and it swaps both streams
       // when mirror is off). wrL/wrR here are the anatomical left/right wrists
@@ -681,78 +540,8 @@ export function RoomViewport({
       const rStream = procLm(handRProc, debugLandmarksRef.current.rightHand, o.persistHands, o.smoothing, alpha);
       const dataForL = mirrorRef.current ? rStream : lStream;
       const dataForR = mirrorRef.current ? lStream : rStream;
-      const updateHand = (
-        hr: HandRig,
-        lm: NormalizedLandmark[] | null,
-        wrist: THREE.Vector3,
-        elbow: THREE.Vector3,
-      ): boolean => {
-        if (!lm || lm.length < 21) {
-          for (const j of hr.joints) j.visible = false;
-          for (const b of hr.bones) b.visible = false;
-          hr.palm.visible = false;
-          return false;
-        }
-        // FK: fixed bone lengths (canonical fraction × per-finger multiplier ×
-        // captured hand length), live bone directions from the image landmarks.
-        const fingerMul = [
-          rig.fingerThumb, rig.fingerIndex, rig.fingerMiddle, rig.fingerRing, rig.fingerLittle,
-        ];
-        const jp: THREE.Vector3[] = new Array(21);
-        jp[0] = wrist.clone();
-        for (let k = 0; k < 20; k++) {
-          const [a, b] = HAND_BONES[k];
-          const d = lmHandDir(lm[a], lm[b], mx);
-          const fi = HAND_BONE_FINGER[k];
-          const mul = fi >= 0 ? fingerMul[fi] : 1;
-          jp[b] = jp[a].clone().addScaledVector(d, HAND_BONE_FRAC[k] * mul * handLenM);
-        }
-        // Point the hand OUTWARD along the forearm: rotate the whole hand about
-        // the wrist so its wrist→middle-knuckle axis aligns with the forearm
-        // direction (elbow→wrist). Finger articulation (curl/spread) is preserved
-        // since we rotate rigidly. This stops the hand from hanging at an odd
-        // angle off a floating wrist ball — it now continues the arm.
-        _v3a.subVectors(jp[9], jp[0]);          // hand forward (wrist→middle base)
-        _v3b.subVectors(wrist, elbow);          // forearm forward (outward)
-        if (_v3a.lengthSq() > 1e-9 && _v3b.lengthSq() > 1e-9) {
-          _hq.setFromUnitVectors(_v3a.normalize(), _v3b.normalize());
-          for (let i = 1; i < 21; i++) jp[i].sub(jp[0]).applyQuaternion(_hq).add(jp[0]);
-        }
-        // Finger bones: tapered cylinder per bone (radius from rig.fingerRcm) +
-        // a sphere cap at each joint. The palm-fan metacarpals are skipped — the
-        // palm is the flattened box below, so the hand looks substantial.
-        const baseFingerR = Math.max(len(rig.fingerRcm), 0.004);
-        for (let k = 0; k < 20; k++) {
-          if (PALM_FAN_BONES.has(k)) { hr.bones[k].visible = false; continue; }
-          const [a, b] = HAND_BONES[k];
-          placeCyl(hr.bones[k], jp[a], jp[b], baseFingerR * HAND_BONE_R[k]);
-        }
-        hr.bones[20].visible = false; // outer palm edge — part of the palm box
-        for (let i = 0; i < 21; i++) placeSph(hr.joints[i], jp[i], baseFingerR * 0.78);
 
-        // Palm: one flattened box spanning wrist → knuckle row, across the
-        // index↔pinky width. The widest, thickest part of the hand.
-        const knuckleMid = jp[5].clone().add(jp[9]).add(jp[13]).add(jp[17]).multiplyScalar(0.25);
-        _pU.subVectors(knuckleMid, jp[0]);
-        _pW.subVectors(jp[5], jp[17]);
-        const palmLen = _pU.length(), palmW = _pW.length();
-        if (palmLen > 1e-4 && palmW > 1e-4) {
-          _pU.normalize();
-          _pR.copy(_pW).addScaledVector(_pU, -_pW.dot(_pU)).normalize();
-          _pF.crossVectors(_pR, _pU).normalize();
-          _pC.addVectors(jp[0], knuckleMid).multiplyScalar(0.5);
-          placeBox(hr.palm, _pC, _pR, _pU, _pF, palmW * 1.08, palmLen * 1.05, len(rig.palmRcm) * 2);
-        } else {
-          hr.palm.visible = false;
-        }
-        return true;
-      };
-      // fingerFK off → pass null so the FK fingers are hidden and a fist sphere
-      // is drawn at the wrist instead.
-      const lFingers = updateHand(handLeft, rls.fingerFK ? dataForL : null, wrL, elL);
-      const rFingers = updateHand(handRight, rls.fingerFK ? dataForR : null, wrR, elR);
-      placeSph(mHandL, lFingers ? null : fist(wrL, elL), handR);
-      placeSph(mHandR, rFingers ? null : fist(wrR, elR), handR);
+      skelRenderer.update(pose, legsTracked, rig, rls, mx, dataForL, dataForR);
 
       // ── eyeballs + gaze (pupil x/y from the smoothed mocap frame, -1..1).
       //    Eyes live in FACE-LOCAL space (faceO + R/U/F basis from the face
@@ -931,7 +720,7 @@ export function RoomViewport({
       renderer.setAnimationLoop(null);
       renderer.dispose();
       renderer.domElement.remove();
-      matL.dispose(); matR.dispose(); matC.dispose();
+      skelRenderer.dispose();
       matFaceFill.dispose(); matFaceLine.dispose();
       matEye.dispose(); matIris.dispose();
       mEyeL.geometry.dispose(); mEyeR.geometry.dispose();
@@ -941,12 +730,6 @@ export function RoomViewport({
       (cube.material as THREE.Material).dispose();
       faceFillGeom.dispose(); faceLineGeom.dispose();
       for (const s of [socketL, socketR]) { s.geom.dispose(); (s.mesh.material as THREE.Material).dispose(); }
-      for (const m of meshes) m.geometry.dispose();
-      for (const h of [handLeft, handRight]) {
-        for (const j of h.joints) j.geometry.dispose();
-        for (const b of h.bones) b.geometry.dispose();
-        h.palm.geometry.dispose();
-      }
       sceneRef.current = null;
       figureRef.current = null;
       const lm = loadedModelRef.current;
