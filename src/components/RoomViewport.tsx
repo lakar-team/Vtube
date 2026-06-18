@@ -465,8 +465,9 @@ export function RoomViewport({
         console.log("[GLB] bone naming: mixamorigHips (no colon)");
       } else {
         console.warn(
-          "[GLB] neither mixamorigHips nor mixamorig:Hips found.",
-          "Bone names in model:", [...bones.keys()].slice(0, 20).join(", "),
+          "[GLB] Bone names don't match standard Mixamo convention.",
+          "Process this model through AI-CAD Character Mode to rename bones before loading in vtube.",
+          "First 20 bone names in model:", [...bones.keys()].slice(0, 20).join(", "),
         );
       }
 

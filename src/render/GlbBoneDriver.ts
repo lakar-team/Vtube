@@ -178,7 +178,6 @@ export class GlbBoneDriver {
     model.group.traverse((obj) => {
       if (obj instanceof THREE.SkinnedMesh) obj.skeleton.update();
     });
-    if (model.skeletonHelper.visible) model.skeletonHelper.update();
 
     if (rules.useModelFace && expressions) {
       const faceMap = model.vtubeFaceMap;
