@@ -3,7 +3,7 @@ import { WebcamView } from "./components/WebcamView";
 import { FaceMeshDebugView } from "./components/FaceMeshDebugView";
 import { RoomViewport, DEFAULT_RULES, type RuleFlags } from "./components/RoomViewport";
 import { RigTuner } from "./components/RigTuner";
-import { RulesInspector, type RuleToggleItem } from "./components/RulesInspector";
+import { RulesInspector, type RuleToggleItem, type RuleNumberItem } from "./components/RulesInspector";
 import { DebugHUD } from "./components/DebugHUD";
 import { useWebcam } from "./hooks/useWebcam";
 import { useMocap } from "./mocap/useMocap";
@@ -104,6 +104,13 @@ export default function App() {
       return next;
     });
   };
+  const setRuleNum = (k: keyof RuleFlags, v: number) => {
+    setRules((prev) => {
+      const next = { ...prev, [k]: v };
+      try { localStorage.setItem(RULES_KEY, JSON.stringify(next)); } catch { /* privacy mode */ }
+      return next;
+    });
+  };
   const [perf, setPerf] = useState<PerfOptions>(loadPerf);
   const setPerfFlag = (k: keyof PerfOptions, v: boolean) => {
     setPerf((prev) => {
@@ -162,6 +169,7 @@ export default function App() {
     { key: "useCustomModel", label: "use custom 3D model", value: rules.useCustomModel, onToggle: (v) => setRule("useCustomModel", v) },
     { key: "useModelFace", label: "model face (ARKit blendshapes)", value: rules.useModelFace, onToggle: (v) => setRule("useModelFace", v) },
     { key: "showModelBones", label: "show model bones (skeleton overlay)", value: rules.showModelBones, onToggle: (v) => setRule("showModelBones", v) },
+    { key: "pauseBoneDriving", label: "DEBUG: pause bone driving (freeze pose)", value: rules.pauseBoneDriving, onToggle: (v) => setRule("pauseBoneDriving", v) },
     { key: "posePersistence", label: "pose persistence", value: persistPose, onToggle: (v) => setBoolPersisted("vtube.persistPose", setPersistPose, v) },
     { key: "handPersistence", label: "hand persistence", value: persistHands, onToggle: (v) => setBoolPersisted("vtube.persistHands", setPersistHands, v) },
     { key: "facePersistence", label: "face persistence", value: persistFace, onToggle: (v) => setBoolPersisted("vtube.persistFace", setPersistFace, v) },
@@ -180,6 +188,10 @@ export default function App() {
     { key: "handsGpu", label: "perf · hands landmarker GPU delegate", value: perf.handsGpu, onToggle: (v) => setPerfFlag("handsGpu", v) },
     { key: "faceCap30", label: "perf · face inference 30fps cap", value: perf.faceCap30, onToggle: (v) => setPerfFlag("faceCap30", v) },
     { key: "poseCap30", label: "perf · pose inference 30fps cap", value: perf.poseCap30, onToggle: (v) => setPerfFlag("poseCap30", v) },
+  ];
+
+  const ruleNumbers: RuleNumberItem[] = [
+    { key: "driveBonesUpTo", label: "DEBUG: drive bones up to # (0=none)", value: rules.driveBonesUpTo, min: 0, max: 9999, step: 1, onSet: (v) => setRuleNum("driveBonesUpTo", v) },
   ];
 
   // ── one-time scale capture: 5s countdown, then snapshot proportions once.
@@ -512,7 +524,7 @@ export default function App() {
                 modelBoneMapOverride={modelBoneMapOverride}
               />
             </div>
-            <RulesInspector toggles={ruleToggles} />
+            <RulesInspector toggles={ruleToggles} numbers={ruleNumbers} />
           </section>
         )}
 

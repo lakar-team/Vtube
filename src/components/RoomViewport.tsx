@@ -82,6 +82,10 @@ export interface RuleFlags {
   useModelFace: boolean;
   /** Overlay a SkeletonHelper (bone lines) on the loaded GLB model. */
   showModelBones: boolean;
+  /** DEBUG: freeze the GLB model in its current pose (skip all bone quaternion updates). */
+  pauseBoneDriving: boolean;
+  /** DEBUG: drive at most this many bones per frame (0 = none). Increment to isolate explosions. */
+  driveBonesUpTo: number;
 }
 
 export const DEFAULT_RULES: RuleFlags = {
@@ -95,6 +99,8 @@ export const DEFAULT_RULES: RuleFlags = {
   useCustomModel: false,
   useModelFace: true,
   showModelBones: false,
+  pauseBoneDriving: false,
+  driveBonesUpTo: 9999,
 };
 
 export interface RoomViewportProps {

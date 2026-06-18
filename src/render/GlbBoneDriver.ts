@@ -53,6 +53,8 @@ const _wristDir   = new THREE.Vector3();
 const len = (cm: number) => cm / 100;
 
 export class GlbBoneDriver {
+  private _debugLogged = new Set<string>();
+
   update(
     model: LoadedModel,
     figurePosition: THREE.Vector3,
@@ -70,11 +72,27 @@ export class GlbBoneDriver {
       figurePosition.z,
     );
 
+    if (rules.pauseBoneDriving) return;
+
+    let boneCount = 0;
+
     const driveBoneByDir = (joint: string, worldDir: THREE.Vector3) => {
+      if (boneCount >= rules.driveBonesUpTo) return;
       const bName = model.boneMap[joint];
       const bone = bName ? model.bones.get(bName) : undefined;
       if (!bone) return;
+      boneCount++;
       const restDir = model.boneRestDirs.get(bName) ?? _bYup;
+      if (!this._debugLogged.has(bone.name)) {
+        this._debugLogged.add(bone.name);
+        const parentWorldQ = new THREE.Quaternion();
+        if (bone.parent) (bone.parent as THREE.Object3D).getWorldQuaternion(parentWorldQ);
+        const localDir = worldDir.clone().applyQuaternion(parentWorldQ.clone().invert()).normalize();
+        if (isNaN(localDir.x) || localDir.lengthSq() < 0.001) {
+          console.warn(`[GlbBoneDriver] bad localDir for ${bone.name}:`, localDir, 'targetWorldDir:', worldDir, 'parentWorldQ:', parentWorldQ);
+        }
+        console.log(`[GlbBoneDriver] ${bone.name}: restDir=${restDir.toArray().map(n => n.toFixed(2))}, localDir=${localDir.toArray().map(n => n.toFixed(2))}`);
+      }
       bone.quaternion.copy(worldDirToBoneLocal(worldDir, bone, restDir));
       bone.updateMatrix();
       if (bone.parent) {

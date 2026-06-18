@@ -13,11 +13,22 @@ export interface RuleToggleItem {
   onToggle: (v: boolean) => void;
 }
 
-export interface RulesInspectorProps {
-  toggles: RuleToggleItem[];
+export interface RuleNumberItem {
+  key: string;
+  label: string;
+  value: number;
+  min?: number;
+  max?: number;
+  step?: number;
+  onSet: (v: number) => void;
 }
 
-export function RulesInspector({ toggles }: RulesInspectorProps) {
+export interface RulesInspectorProps {
+  toggles: RuleToggleItem[];
+  numbers?: RuleNumberItem[];
+}
+
+export function RulesInspector({ toggles, numbers }: RulesInspectorProps) {
   const [copied, setCopied] = useState(false);
 
   const copy = () => {
@@ -52,6 +63,23 @@ export function RulesInspector({ toggles }: RulesInspectorProps) {
             onChange={(e) => t.onToggle(e.target.checked)}
           />
           <span className={`rule-state ${t.value ? "on" : "off"}`}>{t.value ? "on" : "off"}</span>
+        </label>
+      ))}
+      {numbers && numbers.length > 0 && (
+        <div className="tuner-group">debug controls</div>
+      )}
+      {numbers?.map((n) => (
+        <label className="rule-row" key={n.key}>
+          <span>{n.label}</span>
+          <input
+            type="number"
+            min={n.min ?? 0}
+            max={n.max ?? 9999}
+            step={n.step ?? 1}
+            value={n.value}
+            onChange={(e) => n.onSet(Number(e.target.value))}
+            style={{ width: "4.5em" }}
+          />
         </label>
       ))}
     </div>
