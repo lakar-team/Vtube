@@ -5,7 +5,7 @@ import type {
   PoseLandmarkerResult,
 } from "@mediapipe/tasks-vision";
 import { Face, Hand, Pose } from "kalidokit";
-import { mpWorldToThree } from "./coordTransform";
+import { lmToWorld } from './worldFrame';
 import {
   ARKIT_BLENDSHAPE_NAMES,
   emptyFrame,
@@ -336,7 +336,7 @@ export function solveMocapFrame(
     debug.poseWorld = poseWorld as unknown as NormalizedLandmark[];
     // Pre-converted to Three.js Y-up space with mirror applied — downstream
     // drivers read these directly without any further coordinate conversion.
-    debug.poseWorldThree = poseWorld.map(lm => mpWorldToThree(lm, mirror));
+    debug.poseWorldThree = poseWorld.map(lm => lmToWorld(lm, mirror ? -1 : 1));
 
     // Tracking confidence: mean visibility of the upper-body joints we use.
     let vis = 0;

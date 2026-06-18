@@ -48,6 +48,7 @@ const _qSpinePart = new THREE.Quaternion();
 const _qIdent     = new THREE.Quaternion();
 const _spineD     = new THREE.Vector3();
 const _fingerD    = new THREE.Vector3();
+const _wristDir   = new THREE.Vector3();
 
 const len = (cm: number) => cm / 100;
 
@@ -115,8 +116,27 @@ export class GlbBoneDriver {
     driveBone("mixamorigRightArm",     shR, elR, D_UARM_REST_R);
     driveBone("mixamorigLeftForeArm",  elL, wrL, D_LARM_REST_L);
     driveBone("mixamorigRightForeArm", elR, wrR, D_LARM_REST_R);
-    driveBone("mixamorigLeftHand",     elL, wrL, D_LARM_REST_L);
-    driveBone("mixamorigRightHand",    elR, wrR, D_LARM_REST_R);
+    // Hand bones: clamp elbow→wrist to ≤90° from shoulder→elbow.
+    _bDir.subVectors(elL, shL).normalize();
+    _wristDir.subVectors(wrL, elL);
+    if (_wristDir.lengthSq() > 1e-9) {
+      _wristDir.normalize();
+      const angL = Math.acos(Math.max(-1, Math.min(1, _bDir.dot(_wristDir))));
+      if (angL > Math.PI / 2) _wristDir.lerpVectors(_bDir, _wristDir, (Math.PI / 2) / angL).normalize();
+      driveBoneByDir("mixamorigLeftHand", _wristDir);
+    } else {
+      driveBoneByDir("mixamorigLeftHand", D_LARM_REST_L);
+    }
+    _bDir.subVectors(elR, shR).normalize();
+    _wristDir.subVectors(wrR, elR);
+    if (_wristDir.lengthSq() > 1e-9) {
+      _wristDir.normalize();
+      const angR = Math.acos(Math.max(-1, Math.min(1, _bDir.dot(_wristDir))));
+      if (angR > Math.PI / 2) _wristDir.lerpVectors(_bDir, _wristDir, (Math.PI / 2) / angR).normalize();
+      driveBoneByDir("mixamorigRightHand", _wristDir);
+    } else {
+      driveBoneByDir("mixamorigRightHand", D_LARM_REST_R);
+    }
 
     driveBone("mixamorigLeftUpLeg",  hipL, knL,  D_DOWN);
     driveBone("mixamorigRightUpLeg", hipR, knR,  D_DOWN);

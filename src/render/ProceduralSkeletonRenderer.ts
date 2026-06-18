@@ -198,8 +198,8 @@ export class ProceduralSkeletonRenderer {
     const handLenM = len(rig.handLengthCm);
     const handR    = len(rig.handRcm);
 
-    const lFingers = this._updateHand(this._handLeft,  rules.fingerFK ? dataForL : null, wrL, elL, mx, rig, handLenM);
-    const rFingers = this._updateHand(this._handRight, rules.fingerFK ? dataForR : null, wrR, elR, mx, rig, handLenM);
+    const lFingers = this._updateHand(this._handLeft,  rules.fingerFK ? dataForL : null, wrL, elL, shL, mx, rig, handLenM);
+    const rFingers = this._updateHand(this._handRight, rules.fingerFK ? dataForR : null, wrR, elR, shR, mx, rig, handLenM);
     placeSph(this._mHandL, lFingers ? null : fist(wrL, elL), handR);
     placeSph(this._mHandR, rFingers ? null : fist(wrR, elR), handR);
   }
@@ -209,6 +209,7 @@ export class ProceduralSkeletonRenderer {
     lm: NormalizedLandmark[] | null,
     wrist: THREE.Vector3,
     elbow: THREE.Vector3,
+    shoulder: THREE.Vector3,
     mx: number,
     rig: RigConfig,
     handLenM: number,
@@ -231,11 +232,19 @@ export class ProceduralSkeletonRenderer {
       const mul = fi >= 0 ? fingerMul[fi] : 1;
       jp[b] = jp[a].clone().addScaledVector(d, HAND_BONE_FRAC[k] * mul * handLenM);
     }
-    // Orient the hand along the forearm (elbow→wrist) so it continues the arm.
-    _tv3a.subVectors(jp[9], jp[0]);
+    // Clamp elbow→wrist to ≤90° from shoulder→elbow, then orient hand landmarks.
     _tv3b.subVectors(wrist, elbow);
+    if (_tv3b.lengthSq() > 1e-9) {
+      _tv3a.subVectors(elbow, shoulder).normalize(); // forearmDir
+      _tv3b.normalize();                             // rawHandDir
+      const wristAngle = Math.acos(Math.max(-1, Math.min(1, _tv3a.dot(_tv3b))));
+      if (wristAngle > Math.PI / 2) {
+        _tv3b.lerpVectors(_tv3a, _tv3b, (Math.PI / 2) / wristAngle).normalize();
+      }
+    }
+    _tv3a.subVectors(jp[9], jp[0]);
     if (_tv3a.lengthSq() > 1e-9 && _tv3b.lengthSq() > 1e-9) {
-      _thq.setFromUnitVectors(_tv3a.normalize(), _tv3b.normalize());
+      _thq.setFromUnitVectors(_tv3a.normalize(), _tv3b);
       for (let i = 1; i < 21; i++) jp[i].sub(jp[0]).applyQuaternion(_thq).add(jp[0]);
     }
     const baseFingerR = Math.max(len(rig.fingerRcm), 0.004);
