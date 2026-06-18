@@ -7,12 +7,11 @@ import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import type { DebugLandmarks, MocapFrame } from "../mocap/types";
 import type { RigConfig } from "../mocap/rig";
 import { buildCanonicalPose, lmHandDir, worldDirToBoneLocal } from "../mocap/worldFrame";
-import { FACE_CONTOURS, FACE_TRIANGLES } from "./faceMeshData";
 import {
   DEFAULT_BONE_MAP, FINGER_LM_PAIRS, FINGER_BONES_L, FINGER_BONES_R,
-  RIGHT_EYE_RING, LEFT_EYE_RING,
 } from "../mocap/boneMap";
 import { ProceduralSkeletonRenderer } from "../render/ProceduralSkeletonRenderer";
+import { FaceMeshRenderer } from "../render/FaceMeshRenderer";
 
 /**
  * VIEWPORT: 3D Room View (right pane) — Performance View.
@@ -35,8 +34,6 @@ import { ProceduralSkeletonRenderer } from "../render/ProceduralSkeletonRenderer
 
 const MIN_VIS = 0.5;
 const ROOM_DEFAULT = 2.5;
-const FACE_W_FIT = 0.92;        // rendered face width as a fraction of the head diameter (at faceScale 1)
-const FALLBACK_FACE_W = 0.13;   // constant cheek-hinge width used when cheekHingeNorm is OFF
 
 const NOSE = 0, EAR_L = 7, EAR_R = 8;
 const SH_L = 11, SH_R = 12, EL_L = 13, EL_R = 14, WR_L = 15, WR_R = 16;
@@ -44,28 +41,15 @@ const HIP_L = 23, HIP_R = 24, KN_L = 25, KN_R = 26, AN_L = 27, AN_R = 28;
 const TOE_L = 31, TOE_R = 32;
 
 
-// Default directions in room space, used when a live direction is missing. These
-// describe a relaxed STANDING REST POSE (A-pose): arms hanging slightly out from
-// the body, legs straight down, head/torso upright — so a lost or partial body
-// snaps to a natural stance instead of a curled/fetal extrapolation.
+// Default directions in room space, used when a live direction is missing.
 const D_UP   = new THREE.Vector3(0, 1, 0);
 const D_DOWN = new THREE.Vector3(0, -1, 0);
 const D_X    = new THREE.Vector3(1, 0, 0);
 const D_FOOT = new THREE.Vector3(0, -0.3, 1).normalize();
-// Upper arms angle ~27° out from vertical, forearms hang nearer vertical.
 const D_UARM_REST_L = new THREE.Vector3(-0.45, -0.89, 0).normalize();
 const D_UARM_REST_R = new THREE.Vector3( 0.45, -0.89, 0).normalize();
 const D_LARM_REST_L = new THREE.Vector3(-0.28, -0.96, 0.02).normalize();
 const D_LARM_REST_R = new THREE.Vector3( 0.28, -0.96, 0.02).normalize();
-
-
-// ─── shared temporaries (face section only) ──────────────────────────────
-const _fUp   = new THREE.Vector3();
-const _fSide = new THREE.Vector3();
-const _fN    = new THREE.Vector3();
-const _v3a = new THREE.Vector3();
-const _v3b = new THREE.Vector3();
-const _v3c = new THREE.Vector3();
 
 /** Landmark persistence (hold-last-good) + temporal smoothing options. */
 export interface LandmarkOptions {
@@ -142,14 +126,12 @@ interface LoadedModel {
   boneMap: Record<string, string>;
   hipsLocalY: number;
   boneRestQuats: Map<string, THREE.Quaternion>;
-  /** Direction each bone points in its parent's local space at bind pose.
-   *  Derived from bone.children[0].position at load time. Used by driveBoneByDir
-   *  so setFromUnitVectors rotates FROM the actual rest direction, not assumed Y-up. */
+  /** Direction each bone points in its parent's local space at bind pose. */
   boneRestDirs: Map<string, THREE.Vector3>;
   skeletonHelper: THREE.SkeletonHelper;
 }
 
-// Module-scope temps for bone driving — allocated once, reused every frame.
+// Module-scope temps for GLB bone driving — allocated once, reused every frame.
 const _bDir       = new THREE.Vector3();
 const _bYup       = new THREE.Vector3(0, 1, 0);
 const _qTorsoFull = new THREE.Quaternion();
@@ -234,89 +216,7 @@ export function RoomViewport({
     scene.add(figure);
 
     const skelRenderer = new ProceduralSkeletonRenderer(figure);
-
-    // Face: one shared 468-vertex position buffer feeds a SOLID, FULLY OPAQUE
-    // triangle surface (FACE_TRIANGLES) — a true occluder. It is single-sided
-    // (FrontSide; the correct winding is chosen per-frame, since mirroring flips
-    // it) so back-facing triangles never render, and it writes depth so the
-    // contour overlay and anything behind the head are properly hidden.
-    const faceVerts = new Float32Array(468 * 3);
-    const facePosAttr = new THREE.BufferAttribute(faceVerts, 3);
-
-    const faceFillGeom = new THREE.BufferGeometry();
-    faceFillGeom.setAttribute("position", facePosAttr);
-    faceFillGeom.setIndex(new THREE.BufferAttribute(FACE_TRIANGLES, 1));
-    // Stencil-tested: draws only where the eye masks did NOT write ref=1, so the
-    // eye openings become smooth holes in the otherwise-solid surface.
-    const matFaceFill = new THREE.MeshLambertMaterial({
-      color: 0xd9a079, side: THREE.FrontSide,
-      transparent: false, opacity: 1, depthTest: true, depthWrite: true,
-      polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
-      stencilWrite: true, stencilRef: 1, stencilFunc: THREE.NotEqualStencilFunc,
-      stencilFail: THREE.KeepStencilOp, stencilZFail: THREE.KeepStencilOp, stencilZPass: THREE.KeepStencilOp,
-    });
-    const faceFill = new THREE.Mesh(faceFillGeom, matFaceFill);
-    faceFill.frustumCulled = false;
-    faceFill.renderOrder = 2;
-    faceFill.visible = false;
-    figure.add(faceFill);
-
-    const faceLineGeom = new THREE.BufferGeometry();
-    faceLineGeom.setAttribute("position", facePosAttr);
-    faceLineGeom.setIndex(new THREE.BufferAttribute(FACE_CONTOURS, 1));
-    // Contours are depth-tested (but don't write depth) so the opaque face
-    // occludes the segments on the FAR side of the head — only the near contours
-    // show through.
-    const matFaceLine = new THREE.LineBasicMaterial({
-      color: 0x33586b, transparent: true, opacity: 0.7, depthTest: true, depthWrite: false,
-    });
-    const faceLine = new THREE.LineSegments(faceLineGeom, matFaceLine);
-    faceLine.frustumCulled = false;
-    faceLine.renderOrder = 3;
-    faceLine.visible = false;
-    figure.add(faceLine);
-
-    // Eye masks: a smooth almond polygon (triangle fan over the eyelid ring) per
-    // eye. Rendered BEFORE the face writing stencil ref=1 (no colour/depth) — it
-    // punches a smooth eye-shaped HOLE in the face, through which the recessed,
-    // depth-tested eyeball shows (and is hidden by a hand passing in front).
-    const makeSocket = () => {
-      const pos = new Float32Array(17 * 3); // centroid + 16 ring points
-      const geom = new THREE.BufferGeometry();
-      geom.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-      const idx: number[] = [];
-      for (let k = 0; k < 16; k++) idx.push(0, 1 + k, 1 + ((k + 1) % 16));
-      geom.setIndex(idx);
-      const mat = new THREE.MeshBasicMaterial({
-        side: THREE.DoubleSide, colorWrite: false, depthTest: false, depthWrite: false,
-        stencilWrite: true, stencilRef: 1, stencilFunc: THREE.AlwaysStencilFunc,
-        stencilZPass: THREE.ReplaceStencilOp, stencilZFail: THREE.ReplaceStencilOp,
-      });
-      const mesh = new THREE.Mesh(geom, mat);
-      mesh.frustumCulled = false; mesh.renderOrder = 1; mesh.visible = false;
-      figure.add(mesh);
-      return { mesh, geom, pos };
-    };
-    const socketL = makeSocket();
-    const socketR = makeSocket();
-
-    // ── eyeballs (white) + irises (gaze-driven). DEPTH-TESTED + depth-writing:
-    //    they sit recessed behind the face and show only through the stencil eye
-    //    holes (the solid face occludes them elsewhere), and a hand passing in
-    //    front of the face occludes them too. The head sphere is shrunk (below) so
-    //    it doesn't cover the eye area.
-    const matEye = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: true, depthWrite: true });
-    const matIris = new THREE.MeshBasicMaterial({ color: 0x223a5a, depthTest: true, depthWrite: true });
-    const mkEyeSph = (mat: THREE.Material, ro: number) => {
-      const m = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), mat);
-      m.frustumCulled = false; m.visible = false; m.renderOrder = ro;
-      figure.add(m);
-      return m;
-    };
-    // renderOrder 4/5 — after the face (2) so face depth is written first; depth
-    // then governs visibility (through the eye holes, behind hands).
-    const mEyeL = mkEyeSph(matEye, 4); const mEyeR = mkEyeSph(matEye, 4);
-    const mIrisL = mkEyeSph(matIris, 5); const mIrisR = mkEyeSph(matIris, 5);
+    const faceRenderer = new FaceMeshRenderer(figure);
 
     // ── per-stream persistence (hold-last-good) + EMA smoothing ──
     interface LmProc { held: NormalizedLandmark[] | null; sm: NormalizedLandmark[] | null; }
@@ -347,10 +247,7 @@ export function RoomViewport({
     };
 
     let disposed = false;
-
-    // Skin tone — recolour materials only when rig.skinHex changes.
     let lastSkin = "";
-    const _skin = new THREE.Color();
 
     renderer.setAnimationLoop(() => {
       if (disposed) return;
@@ -368,29 +265,22 @@ export function RoomViewport({
       const rig = rigRef.current;
       if (rig.skinHex !== lastSkin) {
         lastSkin = rig.skinHex;
-        _skin.set(rig.skinHex);
-        matFaceFill.color.copy(_skin);
         skelRenderer.applySkin(rig.skinHex);
+        faceRenderer.applySkin(rig.skinHex);
       }
       const mx = mirrorRef.current ? -1 : 1;
       const len = (cm: number) => cm / 100; // cm → meters
 
       figure.position.set(0, len(rig.hipHeightCm), 0);
 
-      // Legs "tracked" = hips + knees confidently visible. When they aren't
-      // (lower body out of frame, e.g. the subject walked up close) ONLY the legs
-      // snap to the straight-down rest pose, so the mannequin doesn't fold into a
-      // fetal crouch at the bottom. The UPPER body keeps its held/live pose
-      // (persistence), so a hand raised to the camera still shows — we never
-      // force the arms to a rest pose here.
       const visOk = (i: number) => { const l = pw?.[i]; return !!l && (l.visibility ?? 1) >= MIN_VIS; };
       const legsTracked = visOk(HIP_L) && visOk(HIP_R) && visOk(KN_L) && visOk(KN_R);
 
       const pose = pw ? buildCanonicalPose(pw, mx) : null;
 
       // ── forward-kinematics positions — fixed lengths, live directions ──
-      // (also consumed by the GLB driver below; skelRenderer re-derives them
-      //  internally so there is temporary duplication until Phase 3c)
+      // (consumed by the GLB driver below; skelRenderer re-derives them
+      //  internally — temporary duplication resolved in Phase 3c)
       const hipMid   = new THREE.Vector3(0, 0, 0);
       const torsoDir = pose ? pose.shMid.clone().sub(pose.hipMid).normalize() : D_UP;
       const shMid    = hipMid.clone().addScaledVector(torsoDir, len(rig.torsoCm));
@@ -416,126 +306,11 @@ export function RoomViewport({
       const toeL = anL.clone().addScaledVector(legPose ? legPose.toeL.clone().sub(legPose.anL).normalize() : D_FOOT, len(rig.footCm));
       const toeR = anR.clone().addScaledVector(legPose ? legPose.toeR.clone().sub(legPose.anR).normalize() : D_FOOT, len(rig.footCm));
 
-      // headR used by both the face section and the eye placement below.
-      const headR = Math.max(len(rig.headDiameterCm) * 0.65, 0.04);
-
-      // ── filled face surface (+ contour overlay) ──────────────────────────
-      // FIXED SIZE — every term comes from RigConfig. The rendered face width is
-      // EXACTLY headDiameterCm × FACE_W_FIT × faceScale (meters), independent of
-      // camera distance and head pose. We get there by normalizing the face by
-      // its OWN cheek-hinge width (landmarks 234↔454): a 3D span (yaw-stable)
-      // that is horizontal (pitch-stable) and ALWAYS present whenever the face is
-      // visible. (The previous pose-ear normalizer froze when the subject stepped
-      // close and the body left frame, which is what blew the face up.) faceScale
-      // is the ONLY size knob; the landmarks supply shape only.
+      // ── face + eyes (delegated to FaceMeshRenderer) ──────────────────
       const face = procLm(faceProc, debugLandmarksRef.current.face, o.persistFace, o.smoothing, alpha);
-      // Face-local frame (room space) — set when the face is tracked, reused to
-      // anchor the eyes so they turn WITH the face (not the head sphere).
-      let faceValid = false;
-      const faceR = new THREE.Vector3();
-      const faceU = new THREE.Vector3();
-      const faceF = new THREE.Vector3();
-      const faceO = new THREE.Vector3();
-      if (face && face.length >= 468) {
-        let cx = 0, cy = 0, cz = 0;
-        for (let i = 0; i < 468; i++) { const p = face[i]; cx += p.x; cy += p.y; cz += p.z; }
-        cx /= 468; cy /= 468; cz /= 468;
+      faceRenderer.update(face, headC, rig, rls, mx, frameRef.current?.pupil);
 
-        const faceTarget = len(rig.headDiameterCm) * FACE_W_FIT * rig.faceScale;
-        const faceW = Math.hypot(
-          face[234].x - face[454].x, face[234].y - face[454].y, face[234].z - face[454].z,
-        );
-        // cheekHingeNorm on → fixed size (normalize by the live cheek-hinge width).
-        // off → a constant guess width, so the face scales with camera distance
-        // (demonstrates why the normalization matters).
-        const fScale = rls.cheekHingeNorm
-          ? (faceW > 1e-4 ? faceTarget / faceW : rig.faceScale)
-          : faceTarget / FALLBACK_FACE_W;
-
-        for (let i = 0; i < 468; i++) {
-          const p = face[i];
-          faceVerts[i * 3]     = mx * (p.x - cx) * fScale;
-          faceVerts[i * 3 + 1] = -(p.y - cy) * fScale;
-          faceVerts[i * 3 + 2] = -(p.z - cz) * fScale;
-        }
-
-        const fx = headC.x + len(rig.faceOffXcm);
-        const fy = headC.y + len(rig.faceOffYcm);
-        const fz = headC.z + len(rig.faceOffZcm);
-        faceFill.position.set(fx, fy, fz);
-        faceLine.position.set(fx, fy, fz);
-
-        // Orthonormal face frame from forehead(10)/chin(152) + sides(234/454):
-        // F forward (toward viewer), U up, R right.
-        const fv = (i: number, c: number) => faceVerts[i * 3 + c];
-        _fUp.set(fv(10, 0) - fv(152, 0), fv(10, 1) - fv(152, 1), fv(10, 2) - fv(152, 2));
-        _fSide.set(fv(454, 0) - fv(234, 0), fv(454, 1) - fv(234, 1), fv(454, 2) - fv(234, 2));
-        _fN.crossVectors(_fSide, _fUp);
-        if (_fN.lengthSq() > 1e-9 && _fUp.lengthSq() > 1e-9) {
-          faceF.copy(_fN).normalize();
-          if (faceF.z < 0) faceF.multiplyScalar(-1); // toward the viewer
-          faceU.copy(_fUp).addScaledVector(faceF, -_fUp.dot(faceF)).normalize();
-          faceR.crossVectors(faceU, faceF).normalize();
-          if (faceR.dot(_fSide) < 0) faceR.multiplyScalar(-1);
-          // Fulcrum: shift every vertex by +F·headR so the rotation pivot (the
-          // head-sphere centre) lands on the mesh anchor, instead of the flat
-          // face swinging on its own mid-plane hinge when the head turns. The
-          // faceFulcrum rule can disable the shift.
-          const shift = rls.faceFulcrum ? headR : 0;
-          const sx = faceF.x * shift, sy = faceF.y * shift, sz = faceF.z * shift;
-          for (let i = 0; i < 468; i++) {
-            faceVerts[i * 3] += sx; faceVerts[i * 3 + 1] += sy; faceVerts[i * 3 + 2] += sz;
-          }
-          // Eye anchor = world position of the re-centred face centroid.
-          faceO.set(fx + sx, fy + sy, fz + sz);
-          faceValid = true;
-
-          // Pick the FrontSide winding for THIS frame: a sample front triangle's
-          // index-order normal should point toward the viewer (≈ faceF). Mirror
-          // flips the winding, so this is recomputed each frame.
-          _v3a.set(fv(34, 0) - fv(127, 0), fv(34, 1) - fv(127, 1), fv(34, 2) - fv(127, 2));
-          _v3b.set(fv(139, 0) - fv(127, 0), fv(139, 1) - fv(127, 1), fv(139, 2) - fv(127, 2));
-          _v3c.crossVectors(_v3a, _v3b);
-          matFaceFill.side = _v3c.dot(faceF) >= 0 ? THREE.FrontSide : THREE.BackSide;
-
-          // Eye sockets — fan over the (already shifted) eyelid-ring vertices.
-          const fillSocket = (sk: { geom: THREE.BufferGeometry; pos: Float32Array }, ring: number[]) => {
-            let scx = 0, scy = 0, scz = 0;
-            for (let k = 0; k < 16; k++) {
-              const r = ring[k];
-              const x = faceVerts[r * 3], y = faceVerts[r * 3 + 1], z = faceVerts[r * 3 + 2];
-              sk.pos[(k + 1) * 3] = x; sk.pos[(k + 1) * 3 + 1] = y; sk.pos[(k + 1) * 3 + 2] = z;
-              scx += x; scy += y; scz += z;
-            }
-            sk.pos[0] = scx / 16; sk.pos[1] = scy / 16; sk.pos[2] = scz / 16;
-            sk.geom.attributes.position.needsUpdate = true;
-          };
-          fillSocket(socketL, LEFT_EYE_RING);
-          fillSocket(socketR, RIGHT_EYE_RING);
-          socketL.mesh.position.set(fx, fy, fz);
-          socketR.mesh.position.set(fx, fy, fz);
-        }
-        facePosAttr.needsUpdate = true;
-        faceFillGeom.computeVertexNormals();
-        faceFill.visible = rls.showFaceMesh;
-        faceLine.visible = rls.showFaceMesh;
-        const socketsOn = faceValid && rls.showFaceMesh && rls.showEyes;
-        socketL.mesh.visible = socketsOn;
-        socketR.mesh.visible = socketsOn;
-      } else {
-        faceFill.visible = false;
-        faceLine.visible = false;
-        socketL.mesh.visible = false;
-        socketR.mesh.visible = false;
-      }
-
-      // ── hands: resolve streams then delegate to skelRenderer ─────────────
-      // solveMocapFrame keys debug.leftHand/rightHand by AVATAR side: in mirror
-      // mode debug.leftHand = the subject's RIGHT hand (and it swaps both streams
-      // when mirror is off). wrL/wrR here are the anatomical left/right wrists
-      // (pose landmarks 15/16). So the stream→wrist pairing flips with mirror:
-      //   mirror on  → rightHand stream feeds wrL, leftHand feeds wrR
-      //   mirror off → leftHand  stream feeds wrL, rightHand feeds wrR
+      // ── hands: resolve streams then delegate to skelRenderer ─────────
       const lStream = procLm(handLProc, debugLandmarksRef.current.leftHand, o.persistHands, o.smoothing, alpha);
       const rStream = procLm(handRProc, debugLandmarksRef.current.rightHand, o.persistHands, o.smoothing, alpha);
       const dataForL = mirrorRef.current ? rStream : lStream;
@@ -543,65 +318,25 @@ export function RoomViewport({
 
       skelRenderer.update(pose, legsTracked, rig, rls, mx, dataForL, dataForR);
 
-      // ── eyeballs + gaze (pupil x/y from the smoothed mocap frame, -1..1).
-      //    Eyes live in FACE-LOCAL space (faceO + R/U/F basis from the face
-      //    landmarks) so they sit in the face mesh and turn with it. eyeX/Y/Z
-      //    are face-local offsets. When no face is tracked, fall back to a
-      //    head-local frame so the eyes still rest on the head sphere.
-      const pupil = frameRef.current?.pupil;
-      const eyeRm = len(rig.eyeRcm);
-      const eyeXm = len(rig.eyeXcm), eyeYm = len(rig.eyeYcm), eyeZm = len(rig.eyeZcm);
-      const gx = (pupil ? pupil.x : 0) * eyeRm * 0.55;
-      const gy = (pupil ? pupil.y : 0) * eyeRm * 0.55;
-      // faceLocalEyes off (or no face) → head-local frame whose anchor sits on
-      // the FRONT SURFACE of the head sphere (not its centre), so the small
-      // face-local eyeZ keeps the eyes on the head instead of buried inside it.
-      if (!faceValid || !rls.faceLocalEyes) {
-        faceR.set(mx, 0, 0); faceU.set(0, 1, 0); faceF.set(0, 0, 1);
-        faceO.copy(headC).addScaledVector(faceF, headR);
-      }
-      const placeEye = (eye: THREE.Mesh, iris: THREE.Mesh, sign: number) => {
-        if (!rls.showEyes) { eye.visible = false; iris.visible = false; return; }
-        const ep = faceO.clone()
-          .addScaledVector(faceR, sign * eyeXm)
-          .addScaledVector(faceU, eyeYm)
-          .addScaledVector(faceF, eyeZm);
-        eye.position.copy(ep); eye.scale.setScalar(eyeRm); eye.visible = true;
-        iris.position.copy(ep)
-          .addScaledVector(faceR, gx)
-          .addScaledVector(faceU, gy)
-          .addScaledVector(faceF, eyeRm * 0.82);
-        iris.scale.setScalar(eyeRm * 0.45); iris.visible = true;
-      };
-      placeEye(mEyeL, mIrisL, -1);
-      placeEye(mEyeR, mIrisR, 1);
-
       // ── GLB model: lives as a direct scene child (not in figure) so that
       //    setting figure.visible = false hides the procedural skeleton cleanly.
-      //    FK direction vectors are the same in world space as in figure-local
-      //    space because figure only translates (identity rotation).
       const model = loadedModelRef.current;
       const useModel = rls.useCustomModel && model !== null;
 
-      // Show procedural skeleton XOR GLB model.
       figure.visible = !useModel;
       if (model) {
         model.group.visible = useModel;
         if (useModel) {
-          // Keep model hips aligned with FK hip position (figure.position in world).
           model.group.position.set(
             figure.position.x,
             figure.position.y - model.hipsLocalY,
             figure.position.z,
           );
         }
-        // SkeletonHelper visibility — updated here; geometry sync happens after FK.
         model.skeletonHelper.visible = useModel && rls.showModelBones;
       }
 
       if (useModel && model) {
-        // Drive a bone to point along worldDir — root-first, propagating matrixWorld
-        // so children read a correct parent transform when driven next.
         const driveBoneByDir = (joint: string, worldDir: THREE.Vector3) => {
           const bName = model.boneMap[joint];
           const bone = bName ? model.bones.get(bName) : undefined;
@@ -627,10 +362,8 @@ export function RoomViewport({
           driveBoneByDir(joint, d);
         };
 
-        // Propagate group's current position into bone world matrices before driving.
         model.group.updateMatrixWorld(true);
 
-        // ── spine (3 bones, weighted slerp: 20% / 55% / 100%) ────────────
         _qTorsoFull.setFromUnitVectors(_bYup, torsoDir);
         _qSpinePart.slerpQuaternions(_qIdent, _qTorsoFull, 0.20);
         driveBoneByDir("mixamorigSpine",  _spineD.copy(_bYup).applyQuaternion(_qSpinePart));
@@ -638,15 +371,12 @@ export function RoomViewport({
         driveBoneByDir("mixamorigSpine1", _spineD.copy(_bYup).applyQuaternion(_qSpinePart));
         driveBoneByDir("mixamorigSpine2", torsoDir);
 
-        // ── neck / head ───────────────────────────────────────────────────
         driveBone("mixamorigNeck", shMid, headC, D_UP);
         driveBone("mixamorigHead", headC, headC.clone().addScaledVector(headDir, len(rig.headDiameterCm * 0.5)), headDir);
 
-        // ── shoulders (clavicles) ─────────────────────────────────────────
         driveBone("mixamorigLeftShoulder",  shMid, shL, D_UARM_REST_L);
         driveBone("mixamorigRightShoulder", shMid, shR, D_UARM_REST_R);
 
-        // ── arms ─────────────────────────────────────────────────────────
         driveBone("mixamorigLeftArm",      shL, elL, D_UARM_REST_L);
         driveBone("mixamorigRightArm",     shR, elR, D_UARM_REST_R);
         driveBone("mixamorigLeftForeArm",  elL, wrL, D_LARM_REST_L);
@@ -654,7 +384,6 @@ export function RoomViewport({
         driveBone("mixamorigLeftHand",     elL, wrL, D_LARM_REST_L);
         driveBone("mixamorigRightHand",    elR, wrR, D_LARM_REST_R);
 
-        // ── legs ─────────────────────────────────────────────────────────
         driveBone("mixamorigLeftUpLeg",  hipL, knL,  D_DOWN);
         driveBone("mixamorigRightUpLeg", hipR, knR,  D_DOWN);
         driveBone("mixamorigLeftLeg",    knL,  anL,  D_DOWN);
@@ -662,7 +391,6 @@ export function RoomViewport({
         driveBone("mixamorigLeftFoot",   anL,  toeL, D_FOOT);
         driveBone("mixamorigRightFoot",  anR,  toeR, D_FOOT);
 
-        // ── fingers (15 bones per hand from MediaPipe hand landmarks) ─────
         const driveFingers = (lm: NormalizedLandmark[] | null, names: readonly string[]) => {
           if (!lm || lm.length < 21) return;
           for (let f = 0; f < 15; f++) {
@@ -675,14 +403,11 @@ export function RoomViewport({
         driveFingers(dataForL, FINGER_BONES_L);
         driveFingers(dataForR, FINGER_BONES_R);
 
-        // Recompute GPU-side bone matrices after all FK is applied.
         model.group.traverse((obj) => {
           if (obj instanceof THREE.SkinnedMesh) obj.skeleton.update();
         });
-        // Sync SkeletonHelper line geometry to the now-driven bone matrixWorlds.
         if (model.skeletonHelper.visible) model.skeletonHelper.update();
 
-        // ── blendshapes (52 ARKit values → GLB morph targets) ────────────
         if (rls.useModelFace) {
           const expr = frameRef.current?.expressions;
           if (expr) {
@@ -721,15 +446,10 @@ export function RoomViewport({
       renderer.dispose();
       renderer.domElement.remove();
       skelRenderer.dispose();
-      matFaceFill.dispose(); matFaceLine.dispose();
-      matEye.dispose(); matIris.dispose();
-      mEyeL.geometry.dispose(); mEyeR.geometry.dispose();
-      mIrisL.geometry.dispose(); mIrisR.geometry.dispose();
+      faceRenderer.dispose();
       grid.dispose();
       (cube.geometry as THREE.BufferGeometry).dispose();
       (cube.material as THREE.Material).dispose();
-      faceFillGeom.dispose(); faceLineGeom.dispose();
-      for (const s of [socketL, socketR]) { s.geom.dispose(); (s.mesh.material as THREE.Material).dispose(); }
       sceneRef.current = null;
       figureRef.current = null;
       const lm = loadedModelRef.current;
@@ -754,7 +474,6 @@ export function RoomViewport({
   // ── GLB model loader ──────────────────────────────────────────────────────
   useEffect(() => {
     if (!modelUrl) {
-      // No URL: remove any existing model from the scene.
       const old = loadedModelRef.current;
       if (old) {
         old.skeletonHelper.parent?.remove(old.skeletonHelper);
@@ -786,7 +505,6 @@ export function RoomViewport({
     loader.load(modelUrl, (gltf) => {
       if (cancelled) return;
 
-      // Remove + dispose previous model.
       const old = loadedModelRef.current;
       if (old) {
         old.skeletonHelper.parent?.remove(old.skeletonHelper);
@@ -804,7 +522,6 @@ export function RoomViewport({
 
       const group = gltf.scene;
 
-      // Bounding box before scaling (raw model units).
       const boxRaw = new THREE.Box3().setFromObject(group);
       const modelHeight = boxRaw.max.y - boxRaw.min.y;
       const targetHeight = rigRef.current.heightCm / 100;
@@ -815,7 +532,6 @@ export function RoomViewport({
         `height=${modelHeight.toFixed(3)} units → scale=${scl.toFixed(5)} (target ${targetHeight.toFixed(2)}m)`,
       );
 
-      // Collect all bones by name.
       const bones = new Map<string, THREE.Bone>();
       let meshCount = 0;
       group.traverse((obj) => {
@@ -827,18 +543,10 @@ export function RoomViewport({
         "— first 10:", [...bones.keys()].slice(0, 10).join(", "),
       );
 
-      // Disable frustum culling on all skinned meshes — the rest-pose bbox
-      // is wrong after FK drives bones outside the bind pose.
       group.traverse((obj) => {
         if (obj instanceof THREE.SkinnedMesh) obj.frustumCulled = false;
       });
 
-      // Capture bind-pose data before any FK driving mutates the skeleton.
-      // boneRestQuats — local quaternions (for potential future delta FK).
-      // boneRestDirs  — direction each bone points in its parent's local space,
-      //                 derived from the first bone child's position. Used by
-      //                 driveBoneByDir so setFromUnitVectors starts from the
-      //                 correct rest orientation, not an assumed Y-up.
       const boneRestQuats = new Map<string, THREE.Quaternion>();
       const boneRestDirs  = new Map<string, THREE.Vector3>();
       bones.forEach((bone, name) => {
@@ -851,11 +559,8 @@ export function RoomViewport({
         }
       });
 
-      // Merge default Mixamo map with any sidecar overrides.
       let boneMap = { ...DEFAULT_BONE_MAP, ...(modelBoneMapRef.current ?? {}) };
 
-      // Auto-detect Mixamo colon naming convention (mixamorig:Hips vs mixamorigHips).
-      // Newer Mixamo exports prefix every bone name with "mixamorig:" (colon).
       if (!bones.has("mixamorigHips") && bones.has("mixamorig:Hips")) {
         console.log("[GLB] detected colon bone naming — rewriting map to mixamorig: prefix");
         const rewritten: Record<string, string> = {};
@@ -872,18 +577,13 @@ export function RoomViewport({
         );
       }
 
-      // Add to scene first so getWorldPosition reflects final scale + hierarchy.
       scene.add(group);
       group.updateMatrixWorld(true);
 
-      // SkeletonHelper draws coloured lines connecting every bone joint.
-      // Hidden by default; toggled live by the showModelBones rule flag.
       const skeletonHelper = new THREE.SkeletonHelper(group);
       skeletonHelper.visible = false;
       scene.add(skeletonHelper);
 
-      // Y offset: position model so hips bone sits at figure's hip origin.
-      // Use getWorldPosition after scene.add() to account for intermediate parents.
       const hipsKey = boneMap["mixamorigHips"] ?? "";
       const hipsBone = bones.get(hipsKey);
       const _tmpVec = new THREE.Vector3();
@@ -897,7 +597,6 @@ export function RoomViewport({
         console.warn("[GLB] hips bone missing — model will sit at Y=0. Check bone names above.");
       }
 
-      // Final bounding box after scaling (should be ~targetHeight m tall).
       const boxFinal = new THREE.Box3().setFromObject(group);
       console.log(
         `[GLB] final bbox after scale: Y=[${boxFinal.min.y.toFixed(3)}, ${boxFinal.max.y.toFixed(3)}]`,
