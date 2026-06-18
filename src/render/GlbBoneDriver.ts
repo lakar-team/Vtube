@@ -24,9 +24,13 @@ export interface LoadedModel {
   group:          THREE.Group;
   bones:          Map<string, THREE.Bone>;
   boneMap:        Record<string, string>;
-  hipsLocalY:   number;
-  boneRestDirs: Map<string, THREE.Vector3>;
+  hipsLocalY:     number;
+  boneRestDirs:   Map<string, THREE.Vector3>;
   skeletonHelper: THREE.SkeletonHelper;
+  /** "arkit" | "custom" | undefined — blendshape convention exported by vtube tools. */
+  vtubeFaceMode:  string | undefined;
+  /** ARKit name → morph target name, used when vtubeFaceMode === "custom". */
+  vtubeFaceMap:   Record<string, string> | undefined;
 }
 
 const D_UP   = new THREE.Vector3(0,  1, 0);
@@ -139,13 +143,15 @@ export class GlbBoneDriver {
     if (model.skeletonHelper.visible) model.skeletonHelper.update();
 
     if (rules.useModelFace && expressions) {
+      const faceMap = model.vtubeFaceMap;
       model.group.traverse((obj) => {
         if (!(obj instanceof THREE.SkinnedMesh)) return;
         const dict = obj.morphTargetDictionary;
         const infl = obj.morphTargetInfluences;
         if (!dict || !infl) return;
-        for (const [name, value] of Object.entries(expressions)) {
-          const idx = dict[name];
+        for (const [arkit, value] of Object.entries(expressions)) {
+          const morphName = faceMap ? (faceMap[arkit] ?? arkit) : arkit;
+          const idx = dict[morphName];
           if (idx !== undefined) infl[idx] = value as number;
         }
       });

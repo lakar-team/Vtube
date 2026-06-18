@@ -491,7 +491,15 @@ export function RoomViewport({
         `— group.position will be set to Y=${(rigRef.current.hipHeightCm / 100 - hipsLocalY).toFixed(3)}m`,
       );
 
-      loadedModelRef.current = { group, bones, boneMap, hipsLocalY, boneRestDirs, skeletonHelper };
+      const vtubeFaceMode = typeof group.userData.vtubeFaceMode === "string"
+        ? group.userData.vtubeFaceMode as string
+        : undefined;
+      const vtubeFaceMap = vtubeFaceMode === "custom" && group.userData.vtubeFaceMap
+        ? group.userData.vtubeFaceMap as Record<string, string>
+        : undefined;
+      if (vtubeFaceMode) console.log("[GLB] vtubeFaceMode:", vtubeFaceMode, vtubeFaceMap ? `(${Object.keys(vtubeFaceMap).length} remaps)` : "");
+
+      loadedModelRef.current = { group, bones, boneMap, hipsLocalY, boneRestDirs, skeletonHelper, vtubeFaceMode, vtubeFaceMap };
       console.log("[GLB] loadedModelRef set — model ready for rendering");
     }, undefined, (err) => {
       console.error("[GLB loader] load error:", err);
