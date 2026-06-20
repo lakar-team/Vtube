@@ -60,8 +60,20 @@ export interface LoadedModel {
 /** Parse gltf.scene.userData.vtubeRig into a compiled VtubeRig.
  *  Returns null if the userData doesn't contain a valid recipe. */
 export function parseVtubeRig(group: THREE.Group): VtubeRig | null {
-  const raw = group.userData.vtubeRig;
-  if (!raw || typeof raw !== "object" || raw.version !== 1 || !raw.bones) return null;
+  // The GLTFExporter serializes userData on a root Group as a *node* extras block,
+  // not as the scene's own extras — so the recipe may live on a child node rather
+  // than on gltf.scene itself.  Walk the hierarchy and use the first hit.
+  // Box the result to avoid TypeScript's control-flow narrowing to `never`
+  // when the variable is assigned inside a closure.
+  const found = { raw: null as Record<string, unknown> | null };
+  group.traverse((obj) => {
+    if (found.raw) return;
+    const ud = obj.userData?.vtubeRig;
+    if (ud && typeof ud === "object" && (ud as Record<string, unknown>).version === 1 && (ud as Record<string, unknown>).bones)
+      found.raw = ud as Record<string, unknown>;
+  });
+  const raw = found.raw;
+  if (!raw) return null;
 
   const rig: VtubeRig = new Map();
   for (const [boneName, rawEntry] of Object.entries(raw.bones as Record<string, unknown>)) {
