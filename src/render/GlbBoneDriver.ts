@@ -2,8 +2,10 @@ import * as THREE from 'three';
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision';
 import type { RigConfig } from '../mocap/rig';
 import type { RuleFlags } from '../components/RoomViewport';
-import { worldDirToBoneLocal, lmHandDir } from '../mocap/worldFrame';
-import { FINGER_LM_PAIRS, FINGER_BONES_L, FINGER_BONES_R } from '../mocap/boneMap';
+import { lmHandDir } from '../mocap/worldFrame';
+import { SpringBoneSimulator } from './SpringBones';
+
+// ── Public types ──────────────────────────────────────────────────────────────
 
 export interface FKPositions {
   hipMid:   THREE.Vector3;
@@ -20,51 +22,117 @@ export interface FKPositions {
   toeL: THREE.Vector3; toeR: THREE.Vector3;
 }
 
-export interface LoadedModel {
-  group:          THREE.Group;
-  bones:          Map<string, THREE.Bone>;
-  boneMap:        Record<string, string>;
-  hipsLocalY:     number;
-  boneRestDirs:   Map<string, THREE.Vector3>;
-  skeletonHelper: THREE.SkeletonHelper;
-  /** "arkit" | "custom" | undefined — blendshape convention exported by vtube tools. */
-  vtubeFaceMode:  string | undefined;
-  /** ARKit name → morph target name, used when vtubeFaceMode === "custom". */
-  vtubeFaceMap:   Record<string, string> | undefined;
+/** Single entry in a parsed vtubeRig — one bone's driving recipe. */
+export interface VtubeRigEntry {
+  bone:       THREE.Bone;
+  role:       "driven" | "spring" | "locked";
+  /** Bone-LOCAL unit vector pointing toward the child bone at bind pose. */
+  restDir:    THREE.Vector3;
+  /** Bind-pose local quaternion — spring target and locked reference. */
+  restQ:      THREE.Quaternion;
+  length:     number;
+  // driven via FK position pair:
+  jointFrom?: string;           // key in FKPositions
+  jointTo?:   string;           // key in FKPositions
+  // driven via MediaPipe hand landmarks (mutually exclusive with jointFrom/To):
+  lmHand?:    "L" | "R";
+  lmPair?:    [number, number]; // [parentLmIdx, childLmIdx]
+  // spring only:
+  stiffness?: number;
+  damping?:   number;
 }
 
-const D_UP   = new THREE.Vector3(0,  1, 0);
-const D_DOWN = new THREE.Vector3(0, -1, 0);
-const D_FOOT = new THREE.Vector3(0, -0.3, 1).normalize();
-const D_UARM_REST_L = new THREE.Vector3(-0.45, -0.89, 0).normalize();
-const D_UARM_REST_R = new THREE.Vector3( 0.45, -0.89, 0).normalize();
-const D_LARM_REST_L = new THREE.Vector3(-0.28, -0.96, 0.02).normalize();
-const D_LARM_REST_R = new THREE.Vector3( 0.28, -0.96, 0.02).normalize();
+/** Map from bone's original scene name → its compiled recipe entry. */
+export type VtubeRig = Map<string, VtubeRigEntry>;
 
-const _bDir       = new THREE.Vector3();
-const _bYup       = new THREE.Vector3(0, 1, 0);
-const _qTorsoFull = new THREE.Quaternion();
-const _qSpinePart = new THREE.Quaternion();
-const _qIdent     = new THREE.Quaternion();
-const _spineD     = new THREE.Vector3();
-const _fingerD    = new THREE.Vector3();
-const _wristDir   = new THREE.Vector3();
+export interface LoadedModel {
+  group:          THREE.Group;
+  bones:          Map<string, THREE.Bone>;  // for logging / inspection
+  hipsLocalY:     number;
+  skeletonHelper: THREE.SkeletonHelper;
+  vtubeFaceMode:  string | undefined;
+  vtubeFaceMap:   Record<string, string> | undefined;
+  vtubeRig:       VtubeRig | null;
+}
 
-const len = (cm: number) => cm / 100;
+// ── Loader helpers (called from RoomViewport GLB loader) ──────────────────────
+
+/** Parse gltf.scene.userData.vtubeRig into a compiled VtubeRig.
+ *  Returns null if the userData doesn't contain a valid recipe. */
+export function parseVtubeRig(group: THREE.Group): VtubeRig | null {
+  const raw = group.userData.vtubeRig;
+  if (!raw || typeof raw !== "object" || raw.version !== 1 || !raw.bones) return null;
+
+  const rig: VtubeRig = new Map();
+  for (const [boneName, rawEntry] of Object.entries(raw.bones as Record<string, unknown>)) {
+    const e = rawEntry as Record<string, unknown>;
+    const bone = group.getObjectByName(boneName);
+    if (!(bone instanceof THREE.Bone)) {
+      console.warn(`[vtubeRig] bone "${boneName}" not found in model — skipped`);
+      continue;
+    }
+    const rd = e.restDir as [number, number, number] | undefined;
+    rig.set(boneName, {
+      bone,
+      role:      (e.role as VtubeRigEntry["role"]) ?? "locked",
+      restDir:   rd ? new THREE.Vector3(rd[0], rd[1], rd[2]).normalize() : new THREE.Vector3(0, 1, 0),
+      restQ:     bone.quaternion.clone(),
+      length:    (e.length as number) ?? 0,
+      jointFrom: e.jointFrom as string | undefined,
+      jointTo:   e.jointTo   as string | undefined,
+      lmHand:    e.lmHand    as "L" | "R" | undefined,
+      lmPair:    e.lmPair    as [number, number] | undefined,
+      stiffness: e.stiffness as number | undefined,
+      damping:   e.damping   as number | undefined,
+    });
+  }
+  console.log(`[vtubeRig] parsed ${rig.size} bone entries (version ${raw.version})`);
+  return rig;
+}
+
+/** Find the world-space Y of the skeleton root bone (parent is not a Bone).
+ *  Falls back to searching the entire group if the rig doesn't include the root. */
+export function findHipsLocalY(group: THREE.Group, vtubeRig: VtubeRig | null): number {
+  let rootBone: THREE.Bone | undefined;
+
+  if (vtubeRig) {
+    for (const entry of vtubeRig.values()) {
+      if (!(entry.bone.parent instanceof THREE.Bone)) { rootBone = entry.bone; break; }
+    }
+  }
+  if (!rootBone) {
+    group.traverse((obj) => {
+      if (obj instanceof THREE.Bone && !(obj.parent instanceof THREE.Bone)) rootBone = obj;
+    });
+  }
+
+  return rootBone ? rootBone.getWorldPosition(new THREE.Vector3()).y : 0;
+}
+
+// ── Module-scope temps (one allocation, reused every frame) ──────────────────
+
+const _bDir     = new THREE.Vector3();
+const _parentQ  = new THREE.Quaternion();
+const _tmpPos   = new THREE.Vector3();
+const _tmpScale = new THREE.Vector3();
+const _localDir = new THREE.Vector3();
+
+// ── Driver ────────────────────────────────────────────────────────────────────
 
 export class GlbBoneDriver {
-  private _debugLogged = new Set<string>();
+  private _spring = new SpringBoneSimulator();
 
   update(
     model: LoadedModel,
     figurePosition: THREE.Vector3,
     fk: FKPositions,
-    rig: RigConfig,
+    _rig: RigConfig,
     rules: RuleFlags,
     mx: number,
     dataForL: NormalizedLandmark[] | null,
     dataForR: NormalizedLandmark[] | null,
     expressions: Record<string, number> | undefined,
+    dt: number,
   ): void {
     model.group.position.set(
       figurePosition.x,
@@ -72,109 +140,75 @@ export class GlbBoneDriver {
       figurePosition.z,
     );
 
-    if (rules.pauseBoneDriving) return;
+    if (rules.pauseBoneDriving || !model.vtubeRig) return;
 
-    let boneCount = 0;
+    const vtubeRig = model.vtubeRig;
+    const fkMap = fk as unknown as Record<string, THREE.Vector3>;
 
-    const driveBoneByDir = (joint: string, worldDir: THREE.Vector3) => {
-      if (boneCount >= rules.driveBonesUpTo) return;
-      const bName = model.boneMap[joint];
-      const bone = bName ? model.bones.get(bName) : undefined;
-      if (!bone) return;
-      boneCount++;
-      const restDir = model.boneRestDirs.get(bName) ?? _bYup;
-      if (!this._debugLogged.has(bone.name)) {
-        this._debugLogged.add(bone.name);
-        const parentWorldQ = new THREE.Quaternion();
-        if (bone.parent) (bone.parent as THREE.Object3D).getWorldQuaternion(parentWorldQ);
-        const localDir = worldDir.clone().applyQuaternion(parentWorldQ.clone().invert()).normalize();
-        if (isNaN(localDir.x) || localDir.lengthSq() < 0.001) {
-          console.warn(`[GlbBoneDriver] bad localDir for ${bone.name}:`, localDir, 'targetWorldDir:', worldDir, 'parentWorldQ:', parentWorldQ);
-        }
-        console.log(`[GlbBoneDriver] ${bone.name}: restDir=${restDir.toArray().map(n => n.toFixed(2))}, localDir=${localDir.toArray().map(n => n.toFixed(2))}`);
-      }
-      bone.quaternion.copy(worldDirToBoneLocal(worldDir, bone, restDir));
-      bone.updateMatrix();
-      if (bone.parent) {
-        bone.matrixWorld.multiplyMatrices(bone.parent.matrixWorld, bone.matrix);
-      } else {
-        bone.matrixWorld.copy(bone.matrix);
-      }
-    };
-    const driveBone = (
-      joint: string,
-      a: THREE.Vector3 | null,
-      b: THREE.Vector3 | null,
-      fallback: THREE.Vector3,
-    ) => {
-      const d = (a && b && _bDir.subVectors(b, a).lengthSq() > 1e-8)
-        ? _bDir.subVectors(b, a).normalize()
-        : fallback;
-      driveBoneByDir(joint, d);
-    };
-
+    // Prime the hierarchy with last frame's quaternions → gives each bone's parent a
+    // fresh matrixWorld before the driving pass begins.
     model.group.updateMatrixWorld(true);
 
-    const { torsoDir, shMid, headC, headDir, shL, shR, hipL, hipR, elL, elR, wrL, wrR, knL, knR, anL, anR, toeL, toeR } = fk;
+    // Single traversal pass (DFS, parent visited before children):
+    //  1. For Bone nodes in the recipe: compute and set the new local quaternion.
+    //  2. For ALL nodes: recompute matrix and propagate matrixWorld downward.
+    //
+    // Because parent comes before child in the traversal, each bone's new quaternion
+    // is computed using its parent's matrixWorld that was JUST updated in this same
+    // pass — eliminating the one-frame stale-parent lag of the two-pass approach.
+    let boneCount = 0;
+    model.group.traverse((obj) => {
+      if (obj instanceof THREE.Bone) {
+        const entry = vtubeRig.get(obj.name);
+        if (entry && entry.role === "driven" && boneCount < rules.driveBonesUpTo) {
+          let worldDir: THREE.Vector3 | null = null;
 
-    _qTorsoFull.setFromUnitVectors(_bYup, torsoDir);
-    _qSpinePart.slerpQuaternions(_qIdent, _qTorsoFull, 0.20);
-    driveBoneByDir("mixamorigSpine",  _spineD.copy(_bYup).applyQuaternion(_qSpinePart));
-    _qSpinePart.slerpQuaternions(_qIdent, _qTorsoFull, 0.55);
-    driveBoneByDir("mixamorigSpine1", _spineD.copy(_bYup).applyQuaternion(_qSpinePart));
-    driveBoneByDir("mixamorigSpine2", torsoDir);
+          if (entry.lmPair) {
+            // Hand-landmark driving
+            const lm = entry.lmHand === "L" ? dataForL : dataForR;
+            if (lm && lm.length > Math.max(entry.lmPair[0], entry.lmPair[1])) {
+              worldDir = lmHandDir(lm[entry.lmPair[0]], lm[entry.lmPair[1]], mx);
+            }
+          } else if (entry.jointFrom && entry.jointTo) {
+            const a = fkMap[entry.jointFrom];
+            const b = fkMap[entry.jointTo];
+            if (a && b) {
+              _bDir.subVectors(b, a);
+              if (_bDir.lengthSq() > 1e-8) worldDir = _bDir.normalize();
+            }
+          }
 
-    driveBone("mixamorigNeck", shMid, headC, D_UP);
-    driveBone("mixamorigHead", headC, headC.clone().addScaledVector(headDir, len(rig.headDiameterCm) * 0.5), headDir);
-
-    driveBone("mixamorigLeftShoulder",  shMid, shL, D_UARM_REST_L);
-    driveBone("mixamorigRightShoulder", shMid, shR, D_UARM_REST_R);
-
-    driveBone("mixamorigLeftArm",      shL, elL, D_UARM_REST_L);
-    driveBone("mixamorigRightArm",     shR, elR, D_UARM_REST_R);
-    driveBone("mixamorigLeftForeArm",  elL, wrL, D_LARM_REST_L);
-    driveBone("mixamorigRightForeArm", elR, wrR, D_LARM_REST_R);
-    // Hand bones: clamp elbow→wrist to ≤90° from shoulder→elbow.
-    _bDir.subVectors(elL, shL).normalize();
-    _wristDir.subVectors(wrL, elL);
-    if (_wristDir.lengthSq() > 1e-9) {
-      _wristDir.normalize();
-      const angL = Math.acos(Math.max(-1, Math.min(1, _bDir.dot(_wristDir))));
-      if (angL > Math.PI / 2) _wristDir.lerpVectors(_bDir, _wristDir, (Math.PI / 2) / angL).normalize();
-      driveBoneByDir("mixamorigLeftHand", _wristDir);
-    } else {
-      driveBoneByDir("mixamorigLeftHand", D_LARM_REST_L);
-    }
-    _bDir.subVectors(elR, shR).normalize();
-    _wristDir.subVectors(wrR, elR);
-    if (_wristDir.lengthSq() > 1e-9) {
-      _wristDir.normalize();
-      const angR = Math.acos(Math.max(-1, Math.min(1, _bDir.dot(_wristDir))));
-      if (angR > Math.PI / 2) _wristDir.lerpVectors(_bDir, _wristDir, (Math.PI / 2) / angR).normalize();
-      driveBoneByDir("mixamorigRightHand", _wristDir);
-    } else {
-      driveBoneByDir("mixamorigRightHand", D_LARM_REST_R);
-    }
-
-    driveBone("mixamorigLeftUpLeg",  hipL, knL,  D_DOWN);
-    driveBone("mixamorigRightUpLeg", hipR, knR,  D_DOWN);
-    driveBone("mixamorigLeftLeg",    knL,  anL,  D_DOWN);
-    driveBone("mixamorigRightLeg",   knR,  anR,  D_DOWN);
-    driveBone("mixamorigLeftFoot",   anL,  toeL, D_FOOT);
-    driveBone("mixamorigRightFoot",  anR,  toeR, D_FOOT);
-
-    const driveFingers = (lm: NormalizedLandmark[] | null, names: readonly string[]) => {
-      if (!lm || lm.length < 21) return;
-      for (let f = 0; f < 15; f++) {
-        const [ia, ib] = FINGER_LM_PAIRS[f];
-        _fingerD.copy(lmHandDir(lm[ia], lm[ib], mx));
-        if (_fingerD.lengthSq() < 1e-9) continue;
-        driveBoneByDir(names[f], _fingerD.normalize());
+          if (worldDir) {
+            // Convert world direction to parent-local space using parent's fresh matrixWorld.
+            if (obj.parent) {
+              obj.parent.matrixWorld.decompose(_tmpPos, _parentQ, _tmpScale);
+              _localDir.copy(worldDir).applyQuaternion(_parentQ.invert());
+            } else {
+              _localDir.copy(worldDir);
+            }
+            _localDir.normalize();
+            if (_localDir.lengthSq() > 1e-4) {
+              obj.quaternion.setFromUnitVectors(entry.restDir, _localDir);
+            }
+            boneCount++;
+          }
+        } else if (entry?.role === "spring") {
+          this._spring.step(obj, entry.restQ, entry.stiffness ?? 0.5, entry.damping ?? 0.5, dt);
+        }
+        // "locked": leave quaternion unchanged (bind pose from GLB)
       }
-    };
-    driveFingers(dataForL, FINGER_BONES_L);
-    driveFingers(dataForR, FINGER_BONES_R);
 
+      // Refresh this node's matrix and matrixWorld. Parent is guaranteed fresh
+      // because traverse visits parent before children.
+      obj.updateMatrix();
+      if (obj.parent) {
+        obj.matrixWorld.multiplyMatrices(obj.parent.matrixWorld, obj.matrix);
+      } else {
+        obj.matrixWorld.copy(obj.matrix);
+      }
+    });
+
+    // After all bone transforms are settled, push them to the skinned mesh deformers.
     model.group.traverse((obj) => {
       if (obj instanceof THREE.SkinnedMesh) obj.skeleton.update();
     });

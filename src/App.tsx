@@ -80,7 +80,6 @@ function loadSmoothAmount(): number {
 export default function App() {
   const videoRef    = useRef<HTMLVideoElement | null>(null);
   const glbInputRef = useRef<HTMLInputElement | null>(null);
-  const jsonInputRef = useRef<HTMLInputElement | null>(null);
 
   const [mirror, setMirror] = useState(true);
   const [showOverlay, setShowOverlay] = useState(true);
@@ -123,7 +122,6 @@ export default function App() {
   const captureTimerRef = useRef<number | null>(null);
 
   const [modelUrl, setModelUrl] = useState<string | null>(null);
-  const [modelBoneMapOverride, setModelBoneMapOverride] = useState<Record<string, string> | null>(null);
   // Revoke the object URL when it changes or on unmount to avoid memory leaks.
   useEffect(() => {
     return () => { if (modelUrl) URL.revokeObjectURL(modelUrl); };
@@ -410,36 +408,6 @@ export default function App() {
               e.target.value = "";
             }}
           />
-          {modelUrl && (
-            <>
-              <button
-                type="button"
-                className="capture-btn"
-                onClick={() => jsonInputRef.current?.click()}
-                title="Load a JSON bone-name map: { &quot;hips&quot;: &quot;BoneName&quot;, … } for non-Mixamo skeletons."
-              >
-                bone map (.json)
-              </button>
-              <input
-                ref={jsonInputRef}
-                type="file"
-                accept=".json"
-                style={{ display: "none" }}
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (!f) return;
-                  f.text().then((t) => {
-                    try {
-                      setModelBoneMapOverride(JSON.parse(t) as Record<string, string>);
-                    } catch {
-                      console.warn("[bone map] invalid JSON");
-                    }
-                  });
-                  e.target.value = "";
-                }}
-              />
-            </>
-          )}
           <span className="toggle persist-group" title="Hold the last-known landmarks briefly when tracking drops, instead of snapping to default.">
             persist:
             <label className="mini"><input type="checkbox" checked={persistPose} onChange={(e) => setBoolPersisted("vtube.persistPose", setPersistPose, e.target.checked)} /> pose</label>
@@ -479,7 +447,6 @@ export default function App() {
               lmOpts={lmOpts}
               rules={rules}
               modelUrl={modelUrl}
-              modelBoneMapOverride={modelBoneMapOverride}
             />
           </section>
         )}
@@ -496,7 +463,6 @@ export default function App() {
                 lmOpts={lmOpts}
                 rules={rules}
                 modelUrl={modelUrl}
-                modelBoneMapOverride={modelBoneMapOverride}
               />
             </div>
             <RigTuner
@@ -521,7 +487,6 @@ export default function App() {
                 lmOpts={lmOpts}
                 rules={rules}
                 modelUrl={modelUrl}
-                modelBoneMapOverride={modelBoneMapOverride}
               />
             </div>
             <RulesInspector toggles={ruleToggles} numbers={ruleNumbers} />

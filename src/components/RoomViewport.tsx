@@ -7,10 +7,12 @@ import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import type { DebugLandmarks, MocapFrame } from "../mocap/types";
 import type { RigConfig } from "../mocap/rig";
 import { buildCanonicalPose } from "../mocap/worldFrame";
-import { DEFAULT_BONE_MAP } from "../mocap/boneMap";
 import { ProceduralSkeletonRenderer } from "../render/ProceduralSkeletonRenderer";
 import { FaceMeshRenderer } from "../render/FaceMeshRenderer";
-import { GlbBoneDriver, type FKPositions, type LoadedModel } from "../render/GlbBoneDriver";
+import {
+  GlbBoneDriver, parseVtubeRig, findHipsLocalY,
+  type FKPositions, type LoadedModel,
+} from "../render/GlbBoneDriver";
 
 /**
  * VIEWPORT: 3D Room View (right pane) — Performance View.
@@ -118,8 +120,6 @@ export interface RoomViewportProps {
   rules?: RuleFlags;
   /** Object URL for a loaded GLB/GLTF file to drive instead of the procedural skeleton. */
   modelUrl?: string | null;
-  /** Overrides for the default Mixamo bone name map. Keys = Mixamo bone names. */
-  modelBoneMapOverride?: Record<string, string> | null;
 }
 
 export function RoomViewport({
@@ -131,7 +131,6 @@ export function RoomViewport({
   lmOpts,
   rules = DEFAULT_RULES,
   modelUrl,
-  modelBoneMapOverride,
 }: RoomViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mirrorRef = useRef(mirror);
@@ -148,9 +147,8 @@ export function RoomViewport({
   // GLB model loading state — bridged between the scene effect and the load effect.
   const sceneRef           = useRef<THREE.Scene | null>(null);
   const figureRef          = useRef<THREE.Group | null>(null);
-  const loadedModelRef     = useRef<LoadedModel | null>(null);
-  const modelBoneMapRef    = useRef(modelBoneMapOverride ?? null);
-  modelBoneMapRef.current  = modelBoneMapOverride ?? null;
+  const loadedModelRef = useRef<LoadedModel | null>(null);
+  const warningRef     = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -231,8 +229,9 @@ export function RoomViewport({
 
     let disposed = false;
     let lastSkin = "";
+    let lastTime = 0;
 
-    renderer.setAnimationLoop(() => {
+    renderer.setAnimationLoop((timestamp: number) => {
       if (disposed) return;
 
       const roomMv = roomMRef.current || ROOM_DEFAULT;
@@ -240,6 +239,9 @@ export function RoomViewport({
       cube.scale.setScalar(roomMv);
       cube.position.y = roomMv / 2;
       controls.update();
+
+      const dt = Math.min((timestamp - lastTime) / 1000, 0.1);
+      lastTime = timestamp;
 
       const o = lmOptsRef.current;
       const rls = rulesRef.current;
@@ -317,7 +319,12 @@ export function RoomViewport({
         model.skeletonHelper.visible = useModel && rls.showModelBones;
       }
       if (useModel && model) {
-        glbDriver.update(model, figure.position, fk, rig, rls, mx, dataForL, dataForR, frameRef.current?.expressions);
+        glbDriver.update(model, figure.position, fk, rig, rls, mx, dataForL, dataForR, frameRef.current?.expressions, dt);
+      }
+
+      if (warningRef.current) {
+        warningRef.current.style.display =
+          (useModel && model && model.vtubeRig === null) ? "block" : "none";
       }
 
       renderer.render(scene, camera);
@@ -442,35 +449,6 @@ export function RoomViewport({
         if (obj instanceof THREE.SkinnedMesh) obj.frustumCulled = false;
       });
 
-      const boneRestDirs = new Map<string, THREE.Vector3>();
-      bones.forEach((bone, name) => {
-        const firstBoneChild = bone.children.find(c => c instanceof THREE.Bone) as THREE.Bone | undefined;
-        if (firstBoneChild && firstBoneChild.position.lengthSq() > 1e-10) {
-          boneRestDirs.set(name, firstBoneChild.position.clone().normalize());
-        } else {
-          boneRestDirs.set(name, new THREE.Vector3(0, 1, 0));
-        }
-      });
-
-      let boneMap = { ...DEFAULT_BONE_MAP, ...(modelBoneMapRef.current ?? {}) };
-
-      if (!bones.has("mixamorigHips") && bones.has("mixamorig:Hips")) {
-        console.log("[GLB] detected colon bone naming — rewriting map to mixamorig: prefix");
-        const rewritten: Record<string, string> = {};
-        for (const [joint, boneName] of Object.entries(boneMap)) {
-          rewritten[joint] = boneName.replace(/^mixamorig(?!:)/, "mixamorig:");
-        }
-        boneMap = rewritten;
-      } else if (bones.has("mixamorigHips")) {
-        console.log("[GLB] bone naming: mixamorigHips (no colon)");
-      } else {
-        console.warn(
-          "[GLB] Bone names don't match standard Mixamo convention.",
-          "Process this model through AI-CAD Character Mode to rename bones before loading in vtube.",
-          "First 20 bone names in model:", [...bones.keys()].slice(0, 20).join(", "),
-        );
-      }
-
       scene.add(group);
       group.updateMatrixWorld(true);
 
@@ -478,25 +456,15 @@ export function RoomViewport({
       skeletonHelper.visible = false;
       scene.add(skeletonHelper);
 
-      const hipsKey = boneMap["mixamorigHips"] ?? "";
-      const hipsBone = bones.get(hipsKey);
-      const _tmpVec = new THREE.Vector3();
-      const hipsLocalY = hipsBone ? hipsBone.getWorldPosition(_tmpVec).y : 0;
-      console.log(
-        `[GLB] hips bone "${hipsKey}" found:`, !!hipsBone,
-        "— hipsLocalY:", hipsLocalY.toFixed(3),
-        "— hipHeightCm target:", rigRef.current.hipHeightCm.toFixed(1),
-      );
-      if (!hipsBone) {
-        console.warn("[GLB] hips bone missing — model will sit at Y=0. Check bone names above.");
+      const vtubeRig = parseVtubeRig(group);
+      if (!vtubeRig) {
+        console.warn(
+          "[GLB] No vtubeRig recipe found in model userData — bone driving disabled.",
+          "Prepare this model in AI-CAD Character Mode to embed a vtubeRig recipe.",
+        );
       }
-
-      const boxFinal = new THREE.Box3().setFromObject(group);
-      console.log(
-        `[GLB] final bbox after scale: Y=[${boxFinal.min.y.toFixed(3)}, ${boxFinal.max.y.toFixed(3)}]`,
-        `height=${(boxFinal.max.y - boxFinal.min.y).toFixed(3)}m`,
-        `— group.position will be set to Y=${(rigRef.current.hipHeightCm / 100 - hipsLocalY).toFixed(3)}m`,
-      );
+      const hipsLocalY = findHipsLocalY(group, vtubeRig);
+      console.log("[GLB] hipsLocalY:", hipsLocalY.toFixed(3), "— hipHeightCm target:", rigRef.current.hipHeightCm.toFixed(1));
 
       const vtubeFaceMode = typeof group.userData.vtubeFaceMode === "string"
         ? group.userData.vtubeFaceMode as string
@@ -506,7 +474,7 @@ export function RoomViewport({
         : undefined;
       if (vtubeFaceMode) console.log("[GLB] vtubeFaceMode:", vtubeFaceMode, vtubeFaceMap ? `(${Object.keys(vtubeFaceMap).length} remaps)` : "");
 
-      loadedModelRef.current = { group, bones, boneMap, hipsLocalY, boneRestDirs, skeletonHelper, vtubeFaceMode, vtubeFaceMap };
+      loadedModelRef.current = { group, bones, hipsLocalY, skeletonHelper, vtubeFaceMode, vtubeFaceMap, vtubeRig };
       console.log("[GLB] loadedModelRef set — model ready for rendering");
     }, undefined, (err) => {
       console.error("[GLB loader] load error:", err);
@@ -519,6 +487,27 @@ export function RoomViewport({
 
   return (
     <div ref={containerRef} className="avatar-viewport">
+      <div
+        ref={warningRef}
+        style={{
+          display: "none",
+          position: "absolute",
+          top: "50%",
+          left: "50%",
+          transform: "translate(-50%, -50%)",
+          background: "rgba(0,0,0,0.75)",
+          color: "#ffcc44",
+          padding: "12px 18px",
+          borderRadius: "8px",
+          fontSize: "13px",
+          textAlign: "center",
+          pointerEvents: "none",
+          zIndex: 10,
+          maxWidth: "280px",
+        }}
+      >
+        This model needs to be prepared in AI-CAD before it can be driven.
+      </div>
       <div className="viewport-badge">
         3D room view · fixed-proportion rig ({roomM}m room · drag to orbit) ·{" "}
         <span style={{ color: "#4477cc" }}>blue=left</span> ·{" "}
