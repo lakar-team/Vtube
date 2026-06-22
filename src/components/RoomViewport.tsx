@@ -143,6 +143,20 @@ export function RoomViewport({
   lmOptsRef.current = lmOpts;
   const rulesRef = useRef(rules);
   rulesRef.current = rules;
+  // debugLandmarksRef/frameRef are themselves MutableRefObjects whose *identity*
+  // can change at runtime now (live mocap vs. replay mocap are two separate
+  // useRef() instances — see App.tsx's `mocap = replayEnabled ? replayMocap :
+  // liveMocap`). The scene-setup effect below mounts the Three.js scene once and
+  // must never re-run on a source switch (that would tear down and rebuild the
+  // whole scene, silently dropping the loaded GLB model — the model-loader
+  // effect only re-fires on `modelUrl` changing, not on a scene rebuild). So,
+  // same ref-mirroring pattern as rulesRef/rigRef above: hold the *current*
+  // ref-object behind a stable wrapper ref, read through it every frame, and
+  // keep these out of the scene effect's dependency array entirely.
+  const landmarksRefHolder = useRef(debugLandmarksRef);
+  landmarksRefHolder.current = debugLandmarksRef;
+  const frameRefHolder = useRef(frameRef);
+  frameRefHolder.current = frameRef;
 
   // GLB model loading state — bridged between the scene effect and the load effect.
   const sceneRef           = useRef<THREE.Scene | null>(null);
@@ -246,7 +260,7 @@ export function RoomViewport({
       const o = lmOptsRef.current;
       const rls = rulesRef.current;
       const alpha = o.smoothing ? Math.max(0.04, 1 - o.smoothAmount) : 1;
-      const pw = procLm(poseProc, debugLandmarksRef.current.poseWorld, o.persistPose, o.smoothing, alpha);
+      const pw = procLm(poseProc, landmarksRefHolder.current.current.poseWorld, o.persistPose, o.smoothing, alpha);
       const rig = rigRef.current;
       if (rig.skinHex !== lastSkin) {
         lastSkin = rig.skinHex;
@@ -297,12 +311,12 @@ export function RoomViewport({
       };
 
       // ── face + eyes (delegated to FaceMeshRenderer) ──────────────────
-      const face = procLm(faceProc, debugLandmarksRef.current.face, o.persistFace, o.smoothing, alpha);
-      faceRenderer.update(face, headC, rig, rls, mx, frameRef.current?.pupil);
+      const face = procLm(faceProc, landmarksRefHolder.current.current.face, o.persistFace, o.smoothing, alpha);
+      faceRenderer.update(face, headC, rig, rls, mx, frameRefHolder.current.current?.pupil);
 
       // ── hands: resolve streams then delegate to skelRenderer ─────────
-      const lStream = procLm(handLProc, debugLandmarksRef.current.leftHand, o.persistHands, o.smoothing, alpha);
-      const rStream = procLm(handRProc, debugLandmarksRef.current.rightHand, o.persistHands, o.smoothing, alpha);
+      const lStream = procLm(handLProc, landmarksRefHolder.current.current.leftHand, o.persistHands, o.smoothing, alpha);
+      const rStream = procLm(handRProc, landmarksRefHolder.current.current.rightHand, o.persistHands, o.smoothing, alpha);
       const dataForL = mirrorRef.current ? rStream : lStream;
       const dataForR = mirrorRef.current ? lStream : rStream;
 
@@ -319,7 +333,7 @@ export function RoomViewport({
         model.skeletonHelper.visible = useModel && rls.showModelBones;
       }
       if (useModel && model) {
-        glbDriver.update(model, figure.position, fk, rig, rls, mx, dataForL, dataForR, frameRef.current?.expressions, dt);
+        glbDriver.update(model, figure.position, fk, rig, rls, mx, dataForL, dataForR, frameRefHolder.current.current?.expressions, dt);
       }
 
       if (warningRef.current) {
@@ -370,8 +384,13 @@ export function RoomViewport({
         loadedModelRef.current = null;
       }
     };
+    // Intentionally empty: this effect builds the Three.js scene exactly once.
+    // debugLandmarksRef/frameRef are read every frame through landmarksRefHolder/
+    // frameRefHolder above precisely so a source switch (live ↔ replay) does NOT
+    // retrigger this effect — see the comment by those refs' declaration for why
+    // a rebuild here silently drops the loaded GLB model.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debugLandmarksRef]);
+  }, []);
 
   // ── GLB model loader ──────────────────────────────────────────────────────
   useEffect(() => {

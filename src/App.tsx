@@ -7,6 +7,9 @@ import { RulesInspector, type RuleToggleItem, type RuleNumberItem } from "./comp
 import { DebugHUD } from "./components/DebugHUD";
 import { useWebcam } from "./hooks/useWebcam";
 import { useMocap } from "./mocap/useMocap";
+import { useMocapRecorder } from "./mocap/useMocapRecorder";
+import { useMocapReplay } from "./mocap/useMocapReplay";
+import type { MocapRecording } from "./mocap/useMocapRecorder";
 import { DEFAULT_PERF, type PerfOptions } from "./mocap/landmarkers";
 import {
   captureRigConfig, loadRigConfig, saveRigConfig,
@@ -128,13 +131,25 @@ export default function App() {
   }, [modelUrl]);
 
   const webcam = useWebcam(videoRef);
-  const mocap = useMocap(videoRef, {
+  const liveMocap = useMocap(videoRef, {
     mirror,
     trackLegs,
     enabled: webcam.ready,
     heightCm,
     perf,
   });
+
+  // Self-diagnosing-loop tooling (see vault/vtube/mocap-replay.md): record a
+  // live session once, then replay it headlessly through the exact same
+  // RoomViewport/GlbBoneDriver code path — no webcam needed — to test model
+  // changes deterministically. Recorder always taps the LIVE refs (recording
+  // a replay-of-a-replay isn't useful); `mocap` below is whichever is active.
+  const [replayRecording, setReplayRecording] = useState<MocapRecording | null>(null);
+  const [replayEnabled, setReplayEnabled] = useState(false);
+  const recorder = useMocapRecorder(liveMocap.debugLandmarksRef, liveMocap.frameRef);
+  const replayMocap = useMocapReplay(replayRecording, replayEnabled);
+  const mocap = replayEnabled && replayRecording ? replayMocap : liveMocap;
+  const replayInputRef = useRef<HTMLInputElement | null>(null);
 
   const changeDisplayMode = (v: DisplayMode) => {
     setDisplayMode(v);
@@ -408,6 +423,68 @@ export default function App() {
               e.target.value = "";
             }}
           />
+          <span className="toggle persist-group" title="Record the live mocap session's raw inputs to the GLB-driving path, for headless replay testing later (see vault/vtube/mocap-replay.md).">
+            {!recorder.isRecording ? (
+              <button
+                type="button"
+                className="capture-btn"
+                onClick={recorder.start}
+                disabled={replayEnabled}
+                title="Start recording raw mocap inputs (poseWorld/hands/face/expressions) for replay."
+              >
+                record mocap
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="capture-btn"
+                onClick={() => recorder.stopAndDownload()}
+                title="Stop and download the recording as JSON."
+              >
+                stop &amp; save ({recorder.frameCount}f)
+              </button>
+            )}
+          </span>
+          <button
+            type="button"
+            className="capture-btn"
+            onClick={() => replayInputRef.current?.click()}
+            title="Load a recorded mocap JSON (from 'record mocap' above) to drive the model headlessly instead of the webcam."
+          >
+            {replayRecording ? "replace replay" : "load replay"}
+          </button>
+          <input
+            ref={replayInputRef}
+            type="file"
+            accept=".json"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (!f) return;
+              const reader = new FileReader();
+              reader.onload = () => {
+                try {
+                  const parsed = JSON.parse(String(reader.result)) as MocapRecording;
+                  console.log("[App] replay loaded:", f.name, "frames:", parsed.frames?.length ?? 0);
+                  setReplayRecording(parsed);
+                } catch (err) {
+                  console.error("[App] failed to parse replay JSON:", err);
+                }
+              };
+              reader.readAsText(f);
+              e.target.value = "";
+            }}
+          />
+          {replayRecording && (
+            <label className="toggle" title="Drive the model from the loaded replay recording instead of the live webcam.">
+              <input
+                type="checkbox"
+                checked={replayEnabled}
+                onChange={(e) => setReplayEnabled(e.target.checked)}
+              />
+              replay mode ({replayRecording.frames.length}f)
+            </label>
+          )}
           <span className="toggle persist-group" title="Hold the last-known landmarks briefly when tracking drops, instead of snapping to default.">
             persist:
             <label className="mini"><input type="checkbox" checked={persistPose} onChange={(e) => setBoolPersisted("vtube.persistPose", setPersistPose, e.target.checked)} /> pose</label>
