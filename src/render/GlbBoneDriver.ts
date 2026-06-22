@@ -57,6 +57,45 @@ export interface LoadedModel {
 
 // ── Loader helpers (called from RoomViewport GLB loader) ──────────────────────
 
+// Mixamo finger/hand segment name → MediaPipe hand landmark pair [parent, child].
+// Used as a fallback when the vtubeRig recipe marks a bone "driven" but omits
+// lmHand/lmPair (current AI-CAD exporter marks fingers driven but doesn't yet
+// populate the landmark mapping).  Keyed by the segment that appears in the bone
+// name after stripping the mixamorig prefix and Left/Right side marker.
+const MIXAMO_FINGER_LM: Readonly<Record<string, [number, number]>> = {
+  // thumb: CMC→MCP, MCP→IP, IP→TIP
+  HandThumb1: [1, 2],  HandThumb2: [2, 3],  HandThumb3: [3, 4],
+  // index
+  HandIndex1:  [5, 6],  HandIndex2:  [6, 7],  HandIndex3:  [7, 8],
+  // middle
+  HandMiddle1: [9, 10], HandMiddle2: [10, 11], HandMiddle3: [11, 12],
+  // ring
+  HandRing1:  [13, 14], HandRing2:  [14, 15], HandRing3:  [15, 16],
+  // pinky
+  HandPinky1: [17, 18], HandPinky2: [18, 19], HandPinky3: [19, 20],
+};
+
+/** If a driven bone has no lmPair/jointFrom+jointTo, try to infer MediaPipe
+ *  hand landmark driving from its Mixamo-style name.  Returns null if the name
+ *  doesn't match any known finger/hand pattern. */
+function inferFingerLmPair(
+  boneName: string,
+): { lmHand: "L" | "R"; lmPair: [number, number] } | null {
+  const side: "L" | "R" | null =
+    boneName.includes("Left") ? "L" : boneName.includes("Right") ? "R" : null;
+  if (!side) return null;
+
+  for (const [seg, pair] of Object.entries(MIXAMO_FINGER_LM)) {
+    if (boneName.includes(seg)) return { lmHand: side, lmPair: pair };
+  }
+  // Bare hand/wrist bone (e.g. LeftHand): no finger segment matched.
+  // Drive from wrist (lm 0) → middle-finger MCP (lm 9) for palm orientation.
+  if (boneName.includes("Hand") && !/Thumb|Index|Middle|Ring|Pinky/.test(boneName)) {
+    return { lmHand: side, lmPair: [0, 9] };
+  }
+  return null;
+}
+
 /** Parse gltf.scene.userData.vtubeRig into a compiled VtubeRig.
  *  Returns null if the userData doesn't contain a valid recipe. */
 export function parseVtubeRig(group: THREE.Group): VtubeRig | null {
@@ -84,16 +123,30 @@ export function parseVtubeRig(group: THREE.Group): VtubeRig | null {
       continue;
     }
     const rd = e.restDir as [number, number, number] | undefined;
+    const role      = (e.role as VtubeRigEntry["role"]) ?? "locked";
+    const jointFrom = (e.jointFrom as string | undefined) || undefined;
+    const jointTo   = (e.jointTo   as string | undefined) || undefined;
+    let   lmHand    = (e.lmHand    as "L" | "R" | undefined) || undefined;
+    let   lmPair    = (e.lmPair    as [number, number] | undefined) || undefined;
+
+    // Fallback: recipe marks bone "driven" but omits MediaPipe landmark params
+    // (current AI-CAD exporter sets role=driven for finger bones but doesn't yet
+    // emit lmHand/lmPair).  Infer from Mixamo bone naming so these models work.
+    if (role === "driven" && !lmPair && !(jointFrom && jointTo)) {
+      const inferred = inferFingerLmPair(boneName);
+      if (inferred) { lmHand = inferred.lmHand; lmPair = inferred.lmPair; }
+    }
+
     rig.set(boneName, {
       bone,
-      role:      (e.role as VtubeRigEntry["role"]) ?? "locked",
+      role,
       restDir:   rd ? new THREE.Vector3(rd[0], rd[1], rd[2]).normalize() : new THREE.Vector3(0, 1, 0),
       restQ:     bone.quaternion.clone(),
       length:    (e.length as number) ?? 0,
-      jointFrom: e.jointFrom as string | undefined,
-      jointTo:   e.jointTo   as string | undefined,
-      lmHand:    e.lmHand    as "L" | "R" | undefined,
-      lmPair:    e.lmPair    as [number, number] | undefined,
+      jointFrom,
+      jointTo,
+      lmHand,
+      lmPair,
       stiffness: e.stiffness as number | undefined,
       damping:   e.damping   as number | undefined,
     });
