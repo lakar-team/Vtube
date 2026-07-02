@@ -46,19 +46,32 @@ export interface CanonicalPose {
 export function buildCanonicalPose(poseWorld: {x:number,y:number,z:number}[], mx: number): CanonicalPose {
   const lm = (i: number) => lmToWorld(poseWorld[i], mx);
   const mid = (a: THREE.Vector3, b: THREE.Vector3) => a.clone().add(b).multiplyScalar(0.5);
-  const hipL = lm(23), hipR = lm(24);
-  const shL = lm(11), shR = lm(12);
+
+  // lmToWorld negates X when mx=-1, so person's right body half maps to negative-x
+  // (the model's left side).  Swap every bilateral index pair so the named joints
+  // (shL/R, elL/R, etc.) land on the correct side of the model in mirror mode.
+  const [i11, i12] = mx === -1 ? [12, 11] : [11, 12]; // shoulders
+  const [i13, i14] = mx === -1 ? [14, 13] : [13, 14]; // elbows
+  const [i15, i16] = mx === -1 ? [16, 15] : [15, 16]; // wrists
+  const [i23, i24] = mx === -1 ? [24, 23] : [23, 24]; // hips
+  const [i25, i26] = mx === -1 ? [26, 25] : [25, 26]; // knees
+  const [i27, i28] = mx === -1 ? [28, 27] : [27, 28]; // ankles
+  const [i31, i32] = mx === -1 ? [32, 31] : [31, 32]; // foot index
+  const [i7,  i8 ] = mx === -1 ? [8,  7 ] : [7,  8 ]; // ears
+
+  const hipL = lm(i23), hipR = lm(i24);
+  const shL  = lm(i11), shR  = lm(i12);
   return {
     hipMid: mid(hipL, hipR), hipL, hipR,
     shMid: mid(shL, shR), shL, shR,
-    elL: lm(13), elR: lm(14),
-    wrL: lm(15), wrR: lm(16),
-    knL: lm(25), knR: lm(26),
-    anL: lm(27), anR: lm(28),
-    toeL: lm(31), toeR: lm(32),
-    headC: mid(lm(7), lm(8)),
+    elL: lm(i13), elR: lm(i14),
+    wrL: lm(i15), wrR: lm(i16),
+    knL: lm(i25), knR: lm(i26),
+    anL: lm(i27), anR: lm(i28),
+    toeL: lm(i31), toeR: lm(i32),
+    headC: mid(lm(i7), lm(i8)),
     noseC: lm(0),
-    earL: lm(7), earR: lm(8),
+    earL: lm(i7), earR: lm(i8),
   };
 }
 

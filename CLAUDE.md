@@ -31,7 +31,7 @@ without anyone needing to remember to run a sync separately. See
 
 <!-- wiki-chain
 id: vtube-claude
-status: GLB bone-driving pipeline stable — full scene-graph traversal refreshes matrixWorld every frame, fixing prior bone drift. SpringBoneSimulator added for secondary motion. Finger driving now works via inferFingerLmPair() fallback in parseVtubeRig() — Mixamo bone names are pattern-matched to MediaPipe hand landmark pairs when lmPair is absent from the GLB recipe (AI-CAD exports fingers with empty fields). VRM-vs-GLB pipeline question for Project AIBO characters still open.
+status: GLB bone-driving pipeline stable — full scene-graph traversal refreshes matrixWorld every frame, fixing prior bone drift. SpringBoneSimulator added for secondary motion. Finger driving now works via inferFingerLmPair() fallback in parseVtubeRig() — Mixamo bone names are pattern-matched to MediaPipe hand landmark pairs when lmPair is absent from the GLB recipe (AI-CAD exports fingers with empty fields). Mirror-mode arm-crossing bug fixed in buildCanonicalPose() — bilateral landmark index pairs (shoulders, elbows, wrists, hips, knees, ankles, feet, ears) are swapped when mx=-1 so named joints (shL/R etc.) land on the correct model side. VRM-vs-GLB pipeline question for Project AIBO characters still open.
 updated: 2026-07-03
 links: [vtube-overview, ai-cad-claude, vtuberig-contract, glb-bone-driver, spring-bones, world-frame]
 -->
