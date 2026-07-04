@@ -3,6 +3,7 @@ import type { MutableRefObject } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { VRMLoaderPlugin, VRMUtils, type VRM } from "@pixiv/three-vrm";
 import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import type { DebugLandmarks, MocapFrame } from "../mocap/types";
 import type { RigConfig } from "../mocap/rig";
@@ -11,8 +12,9 @@ import { ProceduralSkeletonRenderer } from "../render/ProceduralSkeletonRenderer
 import { FaceMeshRenderer } from "../render/FaceMeshRenderer";
 import {
   GlbBoneDriver, parseVtubeRig, findHipsLocalY,
-  type FKPositions, type LoadedModel,
+  type FKPositions, type LoadedModel, type VtubeRig,
 } from "../render/GlbBoneDriver";
+import { buildVrmRig } from "../render/vrmRigAdapter";
 import { DiagnosticsPanel, type CalibrationRequest } from "./DiagnosticsPanel";
 
 /**
@@ -439,6 +441,10 @@ export function RoomViewport({
 
     let cancelled = false;
     const loader = new GLTFLoader();
+    // No-op on plain (non-VRM) GLBs — the existing parseVtubeRig path below is
+    // untouched for those. autoUpdateHumanBones=false: vtube drives raw bones
+    // directly (via buildVrmRig), so the humanoid layer shouldn't fight it.
+    loader.register((parser) => new VRMLoaderPlugin(parser, { autoUpdateHumanBones: false }));
 
     loader.load(modelUrl, (gltf) => {
       if (cancelled) return;
@@ -486,18 +492,32 @@ export function RoomViewport({
       });
 
       scene.add(group);
+
+      // VRMLoaderPlugin sets gltf.userData.vrm when the loaded file is a VRM
+      // (VRM0 or VRM1) — a no-op check on a plain GLB, whose userData won't have it.
+      const vrm = gltf.userData.vrm as VRM | undefined;
+      if (vrm) {
+        VRMUtils.rotateVRM0(vrm); // normalizes VRM0's backwards-facing convention to VRM1's
+        VRMUtils.combineSkeletons(group); // perf: fewer skeletons to update per frame
+      }
       group.updateMatrixWorld(true);
 
       const skeletonHelper = new THREE.SkeletonHelper(group);
       skeletonHelper.visible = false;
       scene.add(skeletonHelper);
 
-      const vtubeRig = parseVtubeRig(group);
-      if (!vtubeRig) {
-        console.warn(
-          "[GLB] No vtubeRig recipe found in model userData — bone driving disabled.",
-          "Prepare this model in AI-CAD Character Mode to embed a vtubeRig recipe.",
-        );
+      let vtubeRig: VtubeRig | null;
+      if (vrm) {
+        vtubeRig = buildVrmRig(vrm);
+        console.log(`[GLB] VRM detected — built vtubeRig from humanoid bones (${vtubeRig.size} entries)`);
+      } else {
+        vtubeRig = parseVtubeRig(group);
+        if (!vtubeRig) {
+          console.warn(
+            "[GLB] No vtubeRig recipe found in model userData — bone driving disabled.",
+            "Prepare this model in AI-CAD Character Mode to embed a vtubeRig recipe.",
+          );
+        }
       }
       const hipsLocalY = findHipsLocalY(group, vtubeRig);
       console.log("[GLB] hipsLocalY:", hipsLocalY.toFixed(3), "— hipHeightCm target:", rigRef.current.hipHeightCm.toFixed(1));
@@ -510,7 +530,7 @@ export function RoomViewport({
         : undefined;
       if (vtubeFaceMode) console.log("[GLB] vtubeFaceMode:", vtubeFaceMode, vtubeFaceMap ? `(${Object.keys(vtubeFaceMap).length} remaps)` : "");
 
-      loadedModelRef.current = { group, bones, hipsLocalY, skeletonHelper, vtubeFaceMode, vtubeFaceMap, vtubeRig };
+      loadedModelRef.current = { group, bones, hipsLocalY, skeletonHelper, vtubeFaceMode, vtubeFaceMap, vtubeRig, vrm: vrm ?? null };
       setDiagModel(loadedModelRef.current);
       console.log("[GLB] loadedModelRef set — model ready for rendering");
     }, undefined, (err) => {

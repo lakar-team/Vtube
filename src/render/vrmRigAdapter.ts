@@ -1,0 +1,118 @@
+import * as THREE from 'three';
+import type { VRM, VRMHumanBoneName } from '@pixiv/three-vrm';
+import { computeRestDirLength } from './rigMath';
+import { bindWorldDirOf, type VtubeRig, type VtubeRigEntry } from './GlbBoneDriver';
+
+/**
+ * Builds a VtubeRig straight from a VRM's humanoid bone map instead of the
+ * userData.vtubeRig recipe AI-CAD embeds in plain GLBs — VRM already has a
+ * standardized humanoid skeleton, so there's nothing to "prepare" first.
+ * See vault/vtube/vrm-support.md.
+ */
+
+const ARM_LEG_JOINTS: Partial<Record<VRMHumanBoneName, { jointFrom: string; jointTo: string }>> = {
+  leftUpperArm:  { jointFrom: 'shL',   jointTo: 'elL' },
+  rightUpperArm: { jointFrom: 'shR',   jointTo: 'elR' },
+  leftLowerArm:  { jointFrom: 'elL',   jointTo: 'wrL' },
+  rightLowerArm: { jointFrom: 'elR',   jointTo: 'wrR' },
+  neck:          { jointFrom: 'shMid', jointTo: 'headC' },
+  leftUpperLeg:  { jointFrom: 'hipL',  jointTo: 'knL' },
+  rightUpperLeg: { jointFrom: 'hipR',  jointTo: 'knR' },
+  leftLowerLeg:  { jointFrom: 'knL',   jointTo: 'anL' },
+  rightLowerLeg: { jointFrom: 'knR',   jointTo: 'anR' },
+  leftFoot:      { jointFrom: 'anL',   jointTo: 'toeL' },
+  rightFoot:     { jointFrom: 'anR',   jointTo: 'toeR' },
+};
+
+const HAND_JOINTS: Partial<Record<VRMHumanBoneName, 'L' | 'R'>> = {
+  leftHand: 'L',
+  rightHand: 'R',
+};
+
+// Prefer the highest bone in the spine chain that exists (upperChest > chest > spine)
+// for the single torso jointFrom/jointTo=hipMid/shMid driven bone.
+const SPINE_PREFERENCE: VRMHumanBoneName[] = ['upperChest', 'chest', 'spine'];
+
+const LOCKED_BONES: VRMHumanBoneName[] = ['hips', 'leftEye', 'rightEye', 'jaw', 'leftToes', 'rightToes'];
+
+// thumb has Metacarpal/Proximal/Distal (no Intermediate); the rest have
+// Proximal/Intermediate/Distal — matches VRMHumanBoneName's finger segments.
+const FINGERS: Array<{ prefix: string; segments: string[]; lmPairs: [number, number][] }> = [
+  { prefix: 'Thumb',  segments: ['Metacarpal', 'Proximal', 'Distal'],       lmPairs: [[1, 2], [2, 3], [3, 4]] },
+  { prefix: 'Index',  segments: ['Proximal', 'Intermediate', 'Distal'],     lmPairs: [[5, 6], [6, 7], [7, 8]] },
+  { prefix: 'Middle', segments: ['Proximal', 'Intermediate', 'Distal'],     lmPairs: [[9, 10], [10, 11], [11, 12]] },
+  { prefix: 'Ring',   segments: ['Proximal', 'Intermediate', 'Distal'],     lmPairs: [[13, 14], [14, 15], [15, 16]] },
+  { prefix: 'Little', segments: ['Proximal', 'Intermediate', 'Distal'],     lmPairs: [[17, 18], [18, 19], [19, 20]] },
+];
+
+function drivenEntry(bone: THREE.Bone, fields: Partial<VtubeRigEntry>): VtubeRigEntry {
+  const { dir, length } = computeRestDirLength(bone);
+  return {
+    bone,
+    role: 'driven',
+    restDir: dir,
+    restQ: bone.quaternion.clone(),
+    bindWorldDir: bindWorldDirOf(bone),
+    length,
+    ...fields,
+  };
+}
+
+function lockedEntry(bone: THREE.Bone): VtubeRigEntry {
+  return {
+    bone,
+    role: 'locked',
+    restDir: new THREE.Vector3(0, 1, 0),
+    restQ: bone.quaternion.clone(),
+    bindWorldDir: bindWorldDirOf(bone),
+    length: 0,
+  };
+}
+
+/** Build a VtubeRig map from a loaded VRM's humanoid bones, keyed by each
+ *  bone's raw (original) node name. Requires the scene's matrixWorld to
+ *  already be up to date (call group.updateMatrixWorld(true) first, same
+ *  requirement as parseVtubeRig). */
+export function buildVrmRig(vrm: VRM): VtubeRig {
+  const rig: VtubeRig = new Map();
+  const humanoid = vrm.humanoid;
+  if (!humanoid) return rig;
+
+  const getBone = (name: VRMHumanBoneName): THREE.Bone | null => {
+    const node = humanoid.getRawBoneNode(name);
+    return node instanceof THREE.Bone ? node : null;
+  };
+
+  for (const name of SPINE_PREFERENCE) {
+    const bone = getBone(name);
+    if (bone) { rig.set(bone.name, drivenEntry(bone, { jointFrom: 'hipMid', jointTo: 'shMid' })); break; }
+  }
+
+  for (const [name, pair] of Object.entries(ARM_LEG_JOINTS) as Array<[VRMHumanBoneName, { jointFrom: string; jointTo: string }]>) {
+    const bone = getBone(name);
+    if (bone) rig.set(bone.name, drivenEntry(bone, pair));
+  }
+
+  for (const [name, side] of Object.entries(HAND_JOINTS) as Array<[VRMHumanBoneName, 'L' | 'R']>) {
+    const bone = getBone(name);
+    if (bone) rig.set(bone.name, drivenEntry(bone, { lmHand: side, lmPair: [0, 9] }));
+  }
+
+  for (const side of ['left', 'right'] as const) {
+    const lmHand: 'L' | 'R' = side === 'left' ? 'L' : 'R';
+    for (const finger of FINGERS) {
+      finger.segments.forEach((segment, i) => {
+        const name = `${side}${finger.prefix}${segment}` as VRMHumanBoneName;
+        const bone = getBone(name);
+        if (bone) rig.set(bone.name, drivenEntry(bone, { lmHand, lmPair: finger.lmPairs[i] }));
+      });
+    }
+  }
+
+  for (const name of LOCKED_BONES) {
+    const bone = getBone(name);
+    if (bone) rig.set(bone.name, lockedEntry(bone));
+  }
+
+  return rig;
+}

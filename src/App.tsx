@@ -402,14 +402,14 @@ export default function App() {
             type="button"
             className="capture-btn"
             onClick={() => glbInputRef.current?.click()}
-            title="Load a GLB/GLTF character model with a Mixamo-compatible skeleton. Toggle it on in the Rules Inspector."
+            title="Load a GLB/GLTF character model with a Mixamo-compatible skeleton (prepared in AI-CAD), or a VRM model (works out of the box). Toggle it on in the Rules Inspector."
           >
             {modelUrl ? "replace model" : "load model"}
           </button>
           <input
             ref={glbInputRef}
             type="file"
-            accept=".glb,.gltf"
+            accept=".glb,.gltf,.vrm"
             style={{ display: "none" }}
             onChange={(e) => {
               const f = e.target.files?.[0];

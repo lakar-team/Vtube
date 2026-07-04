@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision';
+import type { VRM } from '@pixiv/three-vrm';
 import type { RigConfig } from '../mocap/rig';
 import type { RuleFlags } from '../components/RoomViewport';
 import { lmHandDir } from '../mocap/worldFrame';
@@ -60,6 +61,8 @@ export interface LoadedModel {
   vtubeFaceMode:  string | undefined;
   vtubeFaceMap:   Record<string, string> | undefined;
   vtubeRig:       VtubeRig | null;
+  /** Set when the loaded file is a VRM (vs. an AI-CAD-prepared plain GLB) — see vrmRigAdapter.ts. */
+  vrm:            VRM | null;
 }
 
 // ── Loader helpers (called from RoomViewport GLB loader) ──────────────────────
@@ -105,8 +108,9 @@ function inferFingerLmPair(
 
 /** World-space unit direction from a bone to its first child bone. Requires
  *  the scene's matrixWorld to already be up to date. Falls back to world-up
- *  for leaf bones (no child bone to point toward). */
-function bindWorldDirOf(bone: THREE.Bone): THREE.Vector3 {
+ *  for leaf bones (no child bone to point toward). Exported for reuse by
+ *  vrmRigAdapter.ts, which builds VtubeRigEntry objects outside parseVtubeRig. */
+export function bindWorldDirOf(bone: THREE.Bone): THREE.Vector3 {
   const child = bone.children.find((c): c is THREE.Bone => c instanceof THREE.Bone);
   if (!child) return new THREE.Vector3(0, 1, 0);
   const a = bone.getWorldPosition(new THREE.Vector3());
@@ -298,7 +302,15 @@ export class GlbBoneDriver {
       if (obj instanceof THREE.SkinnedMesh) obj.skeleton.update();
     });
 
-    if (rules.useModelFace && expressions) {
+    // VRM spring bones (hair/clothing physics) — humanoid.autoUpdateHumanBones
+    // is off (see vrmRigAdapter.ts / RoomViewport's VRMLoaderPlugin registration),
+    // so this only runs spring bones/constraints, never overriding driven bones.
+    if (model.vrm) model.vrm.update(dt);
+
+    // TODO(vrm face v2): drive VRM expressions (blink/vowel presets) from
+    // `expressions` via vrm.expressionManager instead of the ARKit morph-name
+    // path below, which only makes sense for AI-CAD's raw morph targets.
+    if (rules.useModelFace && expressions && !model.vrm) {
       const faceMap = model.vtubeFaceMap;
       model.group.traverse((obj) => {
         if (!(obj instanceof THREE.SkinnedMesh)) return;
