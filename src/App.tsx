@@ -524,6 +524,7 @@ export default function App() {
               lmOpts={lmOpts}
               rules={rules}
               modelUrl={modelUrl}
+              onSetPause={(v) => setRule("pauseBoneDriving", v)}
             />
           </section>
         )}

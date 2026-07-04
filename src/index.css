@@ -495,6 +495,140 @@ body {
   border-color: var(--border);
 }
 
+/* Rig diagnostics — static-check banner + T-pose calibration flow (see
+   vault/vtube/rig-diagnostics.md). Anchored top-right so it never overlaps
+   the top-left viewport badge or the bottom-center AI-CAD warning. */
+.diag-panel {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: 340px;
+}
+
+.diag-banner {
+  position: relative;
+  background: rgba(0, 0, 0, 0.72);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 28px 8px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.diag-banner.ok {
+  color: var(--ok);
+}
+
+.diag-banner.warn {
+  color: #ffb86c;
+}
+
+.diag-banner-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.diag-issue-list {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.diag-dismiss {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  padding: 0 6px;
+  line-height: 1.4;
+}
+
+.diag-calibrate-btn {
+  font-size: 12px;
+}
+
+.diag-countdown-overlay {
+  position: fixed;
+  left: 50%;
+  bottom: 12%;
+  transform: translateX(-50%);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+  pointer-events: auto;
+}
+
+.diag-countdown-num {
+  font-size: 120px;
+  font-weight: 900;
+  line-height: 0.9;
+  color: #fff;
+  text-shadow: 0 0 60px rgba(124, 92, 255, 0.9), 0 6px 24px rgba(0, 0, 0, 0.95);
+}
+
+.diag-countdown-label {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.95);
+}
+
+.diag-report {
+  background: rgba(0, 0, 0, 0.85);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 11px;
+  width: 340px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.diag-report-header {
+  position: relative;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+  margin-bottom: 6px;
+  padding-right: 20px;
+}
+
+.diag-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+}
+
+.diag-table th,
+.diag-table td {
+  text-align: left;
+  padding: 2px 6px 2px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 110px;
+}
+
+.diag-table th {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.diag-report-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
 footer {
   flex: none;
 }

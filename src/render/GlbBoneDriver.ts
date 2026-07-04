@@ -30,6 +30,13 @@ export interface VtubeRigEntry {
   restDir:    THREE.Vector3;
   /** Bind-pose local quaternion — spring target and locked reference. */
   restQ:      THREE.Quaternion;
+  /**
+   * WORLD-space unit vector from this bone to its first child bone at bind
+   * pose, captured once at parse time (after updateMatrixWorld, before any
+   * driving). Used by rigDiagnostics.ts to compare bind pose against the
+   * recipe's declared restDir/against live FK — never mutated by driving.
+   */
+  bindWorldDir: THREE.Vector3;
   length:     number;
   // driven via FK position pair:
   jointFrom?: string;           // key in FKPositions
@@ -96,6 +103,18 @@ function inferFingerLmPair(
   return null;
 }
 
+/** World-space unit direction from a bone to its first child bone. Requires
+ *  the scene's matrixWorld to already be up to date. Falls back to world-up
+ *  for leaf bones (no child bone to point toward). */
+function bindWorldDirOf(bone: THREE.Bone): THREE.Vector3 {
+  const child = bone.children.find((c): c is THREE.Bone => c instanceof THREE.Bone);
+  if (!child) return new THREE.Vector3(0, 1, 0);
+  const a = bone.getWorldPosition(new THREE.Vector3());
+  const b = child.getWorldPosition(new THREE.Vector3());
+  const dir = b.sub(a);
+  return dir.lengthSq() > 1e-12 ? dir.normalize() : new THREE.Vector3(0, 1, 0);
+}
+
 /** Parse gltf.scene.userData.vtubeRig into a compiled VtubeRig.
  *  Returns null if the userData doesn't contain a valid recipe. */
 export function parseVtubeRig(group: THREE.Group): VtubeRig | null {
@@ -142,6 +161,7 @@ export function parseVtubeRig(group: THREE.Group): VtubeRig | null {
       role,
       restDir:   rd ? new THREE.Vector3(rd[0], rd[1], rd[2]).normalize() : new THREE.Vector3(0, 1, 0),
       restQ:     bone.quaternion.clone(),
+      bindWorldDir: bindWorldDirOf(bone),
       length:    (e.length as number) ?? 0,
       jointFrom,
       jointTo,

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
@@ -13,6 +13,7 @@ import {
   GlbBoneDriver, parseVtubeRig, findHipsLocalY,
   type FKPositions, type LoadedModel,
 } from "../render/GlbBoneDriver";
+import { DiagnosticsPanel, type CalibrationRequest } from "./DiagnosticsPanel";
 
 /**
  * VIEWPORT: 3D Room View (right pane) — Performance View.
@@ -120,6 +121,8 @@ export interface RoomViewportProps {
   rules?: RuleFlags;
   /** Object URL for a loaded GLB/GLTF file to drive instead of the procedural skeleton. */
   modelUrl?: string | null;
+  /** Set the pauseBoneDriving rule — wired to the Diagnostics panel's T-pose calibration flow. */
+  onSetPause?: (paused: boolean) => void;
 }
 
 export function RoomViewport({
@@ -131,6 +134,7 @@ export function RoomViewport({
   lmOpts,
   rules = DEFAULT_RULES,
   modelUrl,
+  onSetPause,
 }: RoomViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mirrorRef = useRef(mirror);
@@ -163,6 +167,10 @@ export function RoomViewport({
   const figureRef          = useRef<THREE.Group | null>(null);
   const loadedModelRef = useRef<LoadedModel | null>(null);
   const warningRef     = useRef<HTMLDivElement | null>(null);
+  // Diagnostics panel needs a React-visible copy of loadedModelRef (state, not
+  // just a ref) so it re-runs staticChecks when a new model finishes loading.
+  const [diagModel, setDiagModel] = useState<LoadedModel | null>(null);
+  const calibRequestRef = useRef<CalibrationRequest | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -310,6 +318,14 @@ export function RoomViewport({
         shL, shR, hipL, hipR, elL, elR, wrL, wrR, knL, knR, anL, anR, toeL, toeR,
       };
 
+      // ── diagnostics: buffer FK frames on demand for T-pose calibration ──
+      const calibReq = calibRequestRef.current;
+      if (calibReq?.collecting) {
+        if (calibReq.startedAt === null) calibReq.startedAt = timestamp;
+        calibReq.samples.push(fk);
+        if (timestamp - calibReq.startedAt >= 1000) calibReq.collecting = false;
+      }
+
       // ── face + eyes (delegated to FaceMeshRenderer) ──────────────────
       const face = procLm(faceProc, landmarksRefHolder.current.current.face, o.persistFace, o.smoothing, alpha);
       faceRenderer.update(face, headC, rig, rls, mx, frameRefHolder.current.current?.pupil);
@@ -409,6 +425,7 @@ export function RoomViewport({
           }
         });
         loadedModelRef.current = null;
+        setDiagModel(null);
       }
       return;
     }
@@ -494,6 +511,7 @@ export function RoomViewport({
       if (vtubeFaceMode) console.log("[GLB] vtubeFaceMode:", vtubeFaceMode, vtubeFaceMap ? `(${Object.keys(vtubeFaceMap).length} remaps)` : "");
 
       loadedModelRef.current = { group, bones, hipsLocalY, skeletonHelper, vtubeFaceMode, vtubeFaceMap, vtubeRig };
+      setDiagModel(loadedModelRef.current);
       console.log("[GLB] loadedModelRef set — model ready for rendering");
     }, undefined, (err) => {
       console.error("[GLB loader] load error:", err);
@@ -527,6 +545,11 @@ export function RoomViewport({
       >
         This model needs to be prepared in AI-CAD before it can be driven.
       </div>
+      <DiagnosticsPanel
+        model={diagModel}
+        calibRequestRef={calibRequestRef}
+        onSetPause={onSetPause ?? (() => {})}
+      />
       <div className="viewport-badge">
         3D room view · fixed-proportion rig ({roomM}m room · drag to orbit) ·{" "}
         <span style={{ color: "#4477cc" }}>blue=left</span> ·{" "}
