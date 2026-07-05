@@ -5,6 +5,7 @@ import { RoomViewport, DEFAULT_RULES, type RuleFlags } from "./components/RoomVi
 import { RigTuner } from "./components/RigTuner";
 import { RulesInspector, type RuleToggleItem, type RuleNumberItem } from "./components/RulesInspector";
 import { DebugHUD } from "./components/DebugHUD";
+import { SetupWizard } from "./components/SetupWizard";
 import { useWebcam } from "./hooks/useWebcam";
 import { useMocap } from "./mocap/useMocap";
 import { useMocapRecorder } from "./mocap/useMocapRecorder";
@@ -125,6 +126,9 @@ export default function App() {
   const captureTimerRef = useRef<number | null>(null);
 
   const [modelUrl, setModelUrl] = useState<string | null>(null);
+  // Original picked filename — lets the Setup Wizard tell a VRM (no AI-CAD
+  // prep needed) apart from a plain GLB (modelUrl itself is an opaque blob: URL).
+  const [modelFileName, setModelFileName] = useState<string | null>(null);
   // Revoke the object URL when it changes or on unmount to avoid memory leaks.
   useEffect(() => {
     return () => { if (modelUrl) URL.revokeObjectURL(modelUrl); };
@@ -401,6 +405,7 @@ export default function App() {
           <button
             type="button"
             className="capture-btn"
+            data-wizard="load-model-btn"
             onClick={() => glbInputRef.current?.click()}
             title="Load a GLB/GLTF character model with a Mixamo-compatible skeleton (prepared in AI-CAD), or a VRM model (works out of the box). Toggle it on in the Rules Inspector."
           >
@@ -418,6 +423,7 @@ export default function App() {
               const url = URL.createObjectURL(f);
               console.log("[App] model picked:", f.name, "size:", f.size, "url:", url);
               setModelUrl(url);
+              setModelFileName(f.name);
               // Auto-enable the custom model on load so the user sees it immediately.
               setRule("useCustomModel", true);
               e.target.value = "";
@@ -500,7 +506,7 @@ export default function App() {
       </header>
 
       <main className="panes">
-        <section className="pane pane-left">
+        <section className="pane pane-left" data-wizard="webcam-pane">
           <WebcamView
             videoRef={videoRef}
             debugLandmarksRef={mocap.debugLandmarksRef}
@@ -594,6 +600,13 @@ export default function App() {
           <div className="capture-countdown-label">Step into frame — capturing scale…</div>
         </div>
       )}
+
+      <SetupWizard
+        modelLoaded={!!modelUrl}
+        modelIsVrm={!!modelFileName?.toLowerCase().endsWith(".vrm")}
+        poseDetected={mocap.state.poseConfidence > 0.1}
+        onReloadModel={() => glbInputRef.current?.click()}
+      />
     </div>
   );
 }

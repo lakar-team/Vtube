@@ -152,7 +152,13 @@ export function DiagnosticsPanel({ model, calibRequestRef, onSetPause }: Diagnos
       )}
 
       {phase === "idle" && (
-        <button type="button" className="btn diag-calibrate-btn" onClick={startCalibration} disabled={!model.vtubeRig}>
+        <button
+          type="button"
+          className="btn diag-calibrate-btn"
+          data-wizard="calibrate-btn"
+          onClick={startCalibration}
+          disabled={!model.vtubeRig}
+        >
           Calibrate (T-pose)
         </button>
       )}

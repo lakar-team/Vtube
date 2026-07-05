@@ -629,6 +629,190 @@ body {
   margin-top: 8px;
 }
 
+/* Setup Wizard — live guided walkthrough (see vault/vtube/setup-wizard.md).
+   Rendered app-wide (fixed positioning) so it's visible regardless of which
+   display mode/pane layout is active, and never covers the 3D viewport. */
+.wizard-fab {
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  z-index: 950;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: #fff;
+  font-weight: 700;
+  font-size: 16px;
+  cursor: pointer;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+}
+
+.wizard-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 960;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 10, 16, 0.6);
+}
+
+.wizard-welcome-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 28px 26px;
+  width: 360px;
+  max-width: calc(100vw - 32px);
+  text-align: center;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+}
+
+.wizard-welcome-card h2 {
+  margin: 0 0 10px;
+  font-size: 19px;
+}
+
+.wizard-welcome-card p {
+  margin: 0 0 18px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.wizard-welcome-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+.wizard-panel {
+  position: fixed;
+  top: 90px;
+  right: 16px;
+  z-index: 900;
+  width: 300px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  box-shadow: 0 6px 30px rgba(0, 0, 0, 0.45);
+}
+
+.wizard-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.wizard-progress {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+}
+
+.wizard-close-btn {
+  padding: 0 8px;
+  line-height: 1.4;
+}
+
+.wizard-step h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.wizard-step p {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.wizard-subnote {
+  color: var(--muted) !important;
+  font-size: 12px !important;
+}
+
+.wizard-note-ok {
+  color: var(--ok) !important;
+  font-weight: 600;
+}
+
+.wizard-note-warn {
+  color: #ffb86c !important;
+}
+
+.wizard-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.wizard-choice {
+  text-align: left;
+  width: 100%;
+}
+
+.wizard-choice.ok {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.wizard-choice.bad {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+.wizard-fix {
+  margin-top: 4px;
+}
+
+.wizard-fix-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.wizard-tips {
+  margin: 0 0 14px;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.wizard-done-btn,
+.wizard-back-btn {
+  width: 100%;
+}
+
+.wizard-back-btn {
+  margin-top: 10px;
+}
+
+@keyframes wizard-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(124, 92, 255, 0.7); }
+  70% { box-shadow: 0 0 0 14px rgba(124, 92, 255, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(124, 92, 255, 0); }
+}
+
+.wizard-highlight-ring {
+  position: fixed;
+  border: 2px solid var(--accent);
+  border-radius: 10px;
+  pointer-events: none;
+  z-index: 890;
+  animation: wizard-pulse 1.6s ease-out infinite;
+}
+
 footer {
   flex: none;
 }
