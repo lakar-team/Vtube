@@ -528,6 +528,10 @@ body {
   color: #ffb86c;
 }
 
+.diag-banner.info {
+  color: var(--accent);
+}
+
 .diag-banner-title {
   font-weight: 600;
   margin-bottom: 4px;
@@ -536,6 +540,11 @@ body {
 .diag-issue-list {
   margin: 0;
   padding-left: 16px;
+}
+
+.diag-issue-info {
+  color: var(--accent);
+  opacity: 0.85;
 }
 
 .diag-dismiss {

@@ -48,6 +48,14 @@ export interface VtubeRigEntry {
   // spring only:
   stiffness?: number;
   damping?:   number;
+  /**
+   * True if the GLB's recipe said role:"driven" for this bone but supplied
+   * neither a usable jointFrom+jointTo pair nor lmHand/lmPair (even after the
+   * inferFingerLmPair() fallback below) — parseVtubeRig() downgrades it to
+   * role:"locked" rather than leaving a dead "driven" entry that never moves.
+   * Purely informational for rigDiagnostics.ts; doesn't affect driving.
+   */
+  autoLockedFromDriven?: boolean;
 }
 
 /** Map from bone's original scene name → its compiled recipe entry. */
@@ -146,7 +154,7 @@ export function parseVtubeRig(group: THREE.Group): VtubeRig | null {
       continue;
     }
     const rd = e.restDir as [number, number, number] | undefined;
-    const role      = (e.role as VtubeRigEntry["role"]) ?? "locked";
+    let   role      = (e.role as VtubeRigEntry["role"]) ?? "locked";
     const jointFrom = (e.jointFrom as string | undefined) || undefined;
     const jointTo   = (e.jointTo   as string | undefined) || undefined;
     let   lmHand    = (e.lmHand    as "L" | "R" | undefined) || undefined;
@@ -159,6 +167,16 @@ export function parseVtubeRig(group: THREE.Group): VtubeRig | null {
       const inferred = inferFingerLmPair(boneName);
       if (inferred) { lmHand = inferred.lmHand; lmPair = inferred.lmPair; }
     }
+
+    // Still nothing to drive it with, even after the fallback above (e.g. an
+    // older AI-CAD export predating its own joint-pair validation, or a
+    // hand-edited recipe with a typo'd joint name) — downgrade to locked
+    // instead of shipping a "driven" bone that silently never moves. No
+    // console warning: this is expected/handled, not an error worth logging
+    // every frame's worth of noise for; rigDiagnostics.ts surfaces it as an
+    // info-level notice instead.
+    const autoLockedFromDriven = role === "driven" && !lmPair && !(jointFrom && jointTo);
+    if (autoLockedFromDriven) role = "locked";
 
     rig.set(boneName, {
       bone,
@@ -173,6 +191,7 @@ export function parseVtubeRig(group: THREE.Group): VtubeRig | null {
       lmPair,
       stiffness: e.stiffness as number | undefined,
       damping:   e.damping   as number | undefined,
+      autoLockedFromDriven,
     });
   }
   console.log(`[vtubeRig] parsed ${rig.size} bone entries (version ${raw.version})`);

@@ -129,20 +129,24 @@ export function DiagnosticsPanel({ model, calibRequestRef, onSetPause }: Diagnos
 
   if (!model) return null;
 
+  const hasWarn = staticIssues.some((iss) => iss.severity === "warn");
+  const bannerClass = staticIssues.length === 0 ? "ok" : hasWarn ? "warn" : "info";
+
   return (
     <div className="diag-panel">
       {bannerVisible && (
-        <div className={`diag-banner ${staticIssues.length === 0 ? "ok" : "warn"}`}>
+        <div className={`diag-banner ${bannerClass}`}>
           {staticIssues.length === 0 ? (
             <span>rig check: no issues found</span>
           ) : (
             <>
               <div className="diag-banner-title">
                 rig check: {staticIssues.length} issue{staticIssues.length === 1 ? "" : "s"}
+                {!hasWarn && " (info only — model still moves correctly)"}
               </div>
               <ul className="diag-issue-list">
                 {staticIssues.map((iss, i) => (
-                  <li key={i}>{iss.message}</li>
+                  <li key={i} className={iss.severity === "info" ? "diag-issue-info" : undefined}>{iss.message}</li>
                 ))}
               </ul>
             </>

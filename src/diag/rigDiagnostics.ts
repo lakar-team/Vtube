@@ -14,7 +14,10 @@ import type { FKPositions, LoadedModel, VtubeRig, VtubeRigEntry } from '../rende
 
 export interface DiagIssue {
   boneName: string;
-  kind: 'staleRestDir' | 'sideMismatch' | 'emptyJoint';
+  kind: 'staleRestDir' | 'sideMismatch' | 'emptyJoint' | 'autoLockedFromDriven';
+  /** 'warn' needs user attention; 'info' is FYI-only — the driver already
+   *  handles it correctly (see GlbBoneDriver.ts's autoLockedFromDriven). */
+  severity: 'warn' | 'info';
   message: string;
   errDeg?: number;
 }
@@ -40,13 +43,31 @@ export function staticChecks(model: LoadedModel): DiagIssue[] {
   if (!rig) return issues;
 
   for (const [boneName, entry] of rig.entries()) {
+    // Info-only: parseVtubeRig() already downgraded this from driven to
+    // locked because the recipe gave it no usable joint pair or hand-landmark
+    // mapping. The model moves correctly regardless — this is just an FYI
+    // that the AI-CAD export could give this bone a real joint pair.
+    if (entry.autoLockedFromDriven) {
+      issues.push({
+        boneName,
+        kind: 'autoLockedFromDriven',
+        severity: 'info',
+        message: `"${boneName}" was recipe'd driven with no usable joint pair — auto-locked (re-export from AI-CAD to give it one).`,
+      });
+    }
+
     if (entry.role !== 'driven') continue;
 
-    // Empty mapping: marked driven but nothing tells the driver how to drive it.
+    // Empty mapping: marked driven but nothing tells the driver how to drive
+    // it. Should be unreachable now that parseVtubeRig() auto-locks this case
+    // (see autoLockedFromDriven above) — kept as a defensive check in case a
+    // rig entry is ever constructed some other way (e.g. a future non-GLB
+    // loader) without going through that downgrade.
     if (!entry.lmPair && !(entry.jointFrom && entry.jointTo)) {
       issues.push({
         boneName,
         kind: 'emptyJoint',
+        severity: 'warn',
         message: `"${boneName}" is role:driven but has no jointFrom/jointTo or lmHand/lmPair — it will never move.`,
       });
       continue;
@@ -68,6 +89,7 @@ export function staticChecks(model: LoadedModel): DiagIssue[] {
         issues.push({
           boneName,
           kind: 'sideMismatch',
+          severity: 'warn',
           message: `"${boneName}" reads as ${side === 'L' ? 'Left' : 'Right'} by name but is driven by "${mismatched}" (opposite side).`,
         });
       }
@@ -83,6 +105,7 @@ export function staticChecks(model: LoadedModel): DiagIssue[] {
           issues.push({
             boneName,
             kind: 'staleRestDir',
+            severity: 'warn',
             message: `"${boneName}"'s recipe restDir is ${err.toFixed(1)}° off the model's actual bind-pose direction.`,
             errDeg: err,
           });
