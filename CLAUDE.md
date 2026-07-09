@@ -11,6 +11,26 @@ This project lives on Google Drive; `npm install` here corrupts `node_modules`.
 Always build through `.\build.ps1` (mirrors to a local build folder, copies
 dist back), same as the AI-CAD project.
 
+## Deployment
+
+Cloudflare Pages is connected to the GitHub repo (github.com/lakar-team/Vtube)
+via Git integration — no manual upload or wrangler CLI needed. Every push to
+any branch triggers a build + deploy on Cloudflare's servers; whichever
+branch is set as "production" in the Cloudflare Pages dashboard is what goes
+live at **vtubemaker.pages.dev** (check the dashboard if you need to know
+which branch that currently is — don't assume it matches whatever branch
+you're on).
+
+Workflow:
+1. Make changes to source files
+2. Build with `.\build.ps1` (local verification — catches TypeScript errors before push)
+3. `git push` (pushes the current branch — no need to name it; use
+   `git push -u origin HEAD` the first time a new branch has no upstream yet)
+4. Cloudflare builds from source on their servers and deploys automatically
+
+The build.ps1 comment "upload that to Cloudflare Pages" is outdated — the Git
+integration handles deployment automatically.
+
 ## Wiki — check before, update after
 
 A knowledge wiki lives at `G:\My Drive\AI Platforms\Wiki` (markdown notes in
