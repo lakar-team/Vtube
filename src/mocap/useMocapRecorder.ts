@@ -1,13 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
-import type { DebugLandmarks, MocapFrame, ExpressionValues } from "./types";
+import type { DebugLandmarks, MocapFrame, ExpressionValues, EulerRotation } from "./types";
 
 /** One sampled instant — the exact inputs RoomViewport's GLB-driving path
  *  reads each frame (debugLandmarksRef's raw landmark arrays + the smoothed
  *  frame's expression weights). Recording these, not the higher-level
  *  Euler-rotation MocapFrame fields, means replay re-exercises the real
- *  buildCanonicalPose → FK → GlbBoneDriver code path, not a shortcut. */
+ *  buildCanonicalPose → FK → GlbBoneDriver code path, not a shortcut.
+ *
+ *  head/pupil ARE two of those higher-level fields (Kalidokit output), but
+ *  are recorded verbatim anyway (not re-derived from raw landmarks on
+ *  replay, the way the rest of the FK pipeline is) because GlbBoneDriver
+ *  consumes them directly for head-bone and eye-gaze driving — re-deriving
+ *  them during replay would mean re-running solveMocapFrame(), which needs
+ *  full MediaPipe Result objects and an HTMLVideoElement, not just landmark
+ *  arrays. Same treatment as expressions below, for the same reason. */
 export interface RecordedFrame {
   /** Seconds since recording start. */
   t: number;
@@ -16,6 +24,8 @@ export interface RecordedFrame {
   rightHand: NormalizedLandmark[] | null;
   face: NormalizedLandmark[] | null;
   expressions: ExpressionValues | null;
+  head: EulerRotation | null;
+  pupil: { x: number; y: number } | null;
 }
 
 export interface MocapRecording {
@@ -59,6 +69,8 @@ export function useMocapRecorder(
       rightHand: cloneLm(lm.rightHand),
       face: cloneLm(lm.face),
       expressions: frameRef.current?.expressions ? { ...frameRef.current.expressions } : null,
+      head: frameRef.current?.head ? { ...frameRef.current.head } : null,
+      pupil: frameRef.current?.pupil ? { ...frameRef.current.pupil } : null,
     });
     // Cheap progress readout for the UI; not on every push to avoid extra
     // re-renders — every ~6 frames is plenty for a counter.

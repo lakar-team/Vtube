@@ -81,6 +81,8 @@ export function useMocapReplay(
         t: rf.t,
         poseTracked: !!rf.poseWorld,
         expressions: rf.expressions ?? base.expressions,
+        head: rf.head ?? base.head,
+        pupil: rf.pupil ?? base.pupil,
       };
       frameRef.current = next;
       rawFrameRef.current = next;
