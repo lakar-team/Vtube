@@ -85,7 +85,7 @@ export default function App() {
   const videoRef    = useRef<HTMLVideoElement | null>(null);
   const glbInputRef = useRef<HTMLInputElement | null>(null);
 
-  const [mirror, setMirror] = useState(true);
+  const [mirror, setMirror] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
   const [trackLegs, setTrackLegs] = useState(true);
   const [displayMode, setDisplayMode] = useState<DisplayMode>(loadDisplayMode);
