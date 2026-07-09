@@ -141,11 +141,22 @@ export function buildVrmRig(vrm: VRM): VtubeRig {
     const bone = getBone(name);
     if (bone) {
       const childName = CHAIN_CHILD[name];
-      rig.set(bone.name, drivenEntry(
+      const entry = drivenEntry(
         bone,
         { lmHand: hj.side, lmPair: [0, 9], jointFrom: hj.jointFrom, jointTo: hj.jointTo },
         childName ? getBone(childName) : undefined,
-      ));
+      );
+      // Second reference axis (wrist -> index-finger MCP) so the wrist gets
+      // a full 2-axis orientation instead of single-vector alignment, which
+      // leaves palm-facing/twist unconstrained — see restSideLocal's doc
+      // comment on VtubeRigEntry in GlbBoneDriver.ts.
+      const indexName = (hj.side === 'L' ? 'leftIndexProximal' : 'rightIndexProximal') as VRMHumanBoneName;
+      const indexBone = getBone(indexName);
+      if (indexBone) {
+        entry.restSideLocal = computeRestDirLength(bone, indexBone).dir;
+        entry.lmSidePair = [0, 5];
+      }
+      rig.set(bone.name, entry);
     }
   }
 

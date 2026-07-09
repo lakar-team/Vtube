@@ -67,6 +67,20 @@ export interface VtubeRigEntry {
   lmHand?:    "L" | "R";
   lmPair?:    [number, number]; // [parentLmIdx, childLmIdx]
   /**
+   * Second bone-LOCAL reference direction (bind pose) + landmark pair, for
+   * wrist bones only — see the "wrist twist" fix in GlbBoneDriver.update().
+   * `lmPair` alone only constrains ONE axis (which way the hand points,
+   * wrist->middle-MCP); the rotation AROUND that axis — which way the palm
+   * faces — is then whatever THREE.Quaternion.setFromUnitVectors()'s
+   * minimal-rotation happens to produce, which has no relationship to the
+   * hand's actual roll and can flip/drift unpredictably. Set on both: a
+   * second live landmark pair (wrist->index-MCP) and its bind-pose
+   * bone-local equivalent, so the driver can build a full 2-axis orthonormal
+   * frame instead of aligning a single vector.
+   */
+  restSideLocal?: THREE.Vector3;
+  lmSidePair?:    [number, number];
+  /**
    * When set, this bone is driven directly from a named Kalidokit-solved
    * Euler-rotation channel on the current MocapFrame instead of the
    * jointFrom/jointTo or lmHand/lmPair direction-matching paths above:
@@ -287,6 +301,38 @@ const _tmpPos   = new THREE.Vector3();
 const _tmpScale = new THREE.Vector3();
 const _localDir = new THREE.Vector3();
 const _tEuler   = new THREE.Euler();
+const _localSide   = new THREE.Vector3();
+const _qRestBasis  = new THREE.Quaternion();
+const _qLiveBasis  = new THREE.Quaternion();
+const _obX = new THREE.Vector3();
+const _obY = new THREE.Vector3();
+const _obZ = new THREE.Vector3();
+const _obM = new THREE.Matrix4();
+
+/**
+ * Builds an absolute orientation quaternion from a primary axis (already
+ * normalized) + a rough secondary reference (Gram-Schmidt-orthogonalized
+ * against the primary, so it need not be exactly perpendicular). Used to
+ * give the wrist a full 2-axis orientation instead of the single-vector
+ * `setFromUnitVectors` alignment everything else uses — see
+ * VtubeRigEntry.restSideLocal's doc comment for why the wrist specifically
+ * needs this (twist/roll is unconstrained by a single direction vector).
+ */
+function basisQuaternion(primary: THREE.Vector3, sideRough: THREE.Vector3, out: THREE.Quaternion): void {
+  _obX.copy(primary);
+  _obY.copy(sideRough).addScaledVector(primary, -sideRough.dot(primary));
+  if (_obY.lengthSq() < 1e-8) {
+    // sideRough was (near) parallel to primary — pick any non-parallel
+    // fallback so the basis stays well-defined instead of degenerating.
+    _obY.set(1, 0, 0);
+    if (Math.abs(_obX.dot(_obY)) > 0.99) _obY.set(0, 1, 0);
+    _obY.addScaledVector(_obX, -_obX.dot(_obY));
+  }
+  _obY.normalize();
+  _obZ.crossVectors(_obX, _obY).normalize();
+  _obM.makeBasis(_obX, _obY, _obZ);
+  out.setFromRotationMatrix(_obM);
+}
 
 // ── Driver ────────────────────────────────────────────────────────────────────
 
@@ -385,7 +431,30 @@ export class GlbBoneDriver {
               }
               _localDir.normalize();
               if (_localDir.lengthSq() > 1e-4) {
-                obj.quaternion.setFromUnitVectors(entry.restDir, _localDir);
+                // Wrist bones (restSideLocal/lmSidePair set): full 2-axis
+                // orientation — see restSideLocal's doc comment. Everything
+                // else: single-axis alignment (fine for limbs, which only
+                // need "which way does this segment point", not roll).
+                let usedTwoAxis = false;
+                if (entry.restSideLocal && entry.lmSidePair) {
+                  const lm = entry.lmHand === "L" ? dataForL : dataForR;
+                  const [sa, sb] = entry.lmSidePair;
+                  if (lm && lm.length > Math.max(sa, sb)) {
+                    const sideWorldDir = lmHandDir(lm[sa], lm[sb], mx);
+                    if (obj.parent) {
+                      _localSide.copy(sideWorldDir).applyQuaternion(_parentQ.invert());
+                    } else {
+                      _localSide.copy(sideWorldDir);
+                    }
+                    basisQuaternion(entry.restDir, entry.restSideLocal, _qRestBasis);
+                    basisQuaternion(_localDir, _localSide, _qLiveBasis);
+                    obj.quaternion.copy(_qLiveBasis).multiply(_qRestBasis.invert());
+                    usedTwoAxis = true;
+                  }
+                }
+                if (!usedTwoAxis) {
+                  obj.quaternion.setFromUnitVectors(entry.restDir, _localDir);
+                }
               }
               boneCount++;
             }
