@@ -62,8 +62,10 @@ export function staticChecks(model: LoadedModel): DiagIssue[] {
     // it. Should be unreachable now that parseVtubeRig() auto-locks this case
     // (see autoLockedFromDriven above) — kept as a defensive check in case a
     // rig entry is ever constructed some other way (e.g. a future non-GLB
-    // loader) without going through that downgrade.
-    if (!entry.lmPair && !(entry.jointFrom && entry.jointTo)) {
+    // loader) without going through that downgrade. eulerChannel (head/eye
+    // gaze — see vrmRigAdapter.ts) is a third valid driving mechanism, not
+    // just jointFrom/jointTo or lmPair.
+    if (!entry.lmPair && !(entry.jointFrom && entry.jointTo) && !entry.eulerChannel) {
       issues.push({
         boneName,
         kind: 'emptyJoint',

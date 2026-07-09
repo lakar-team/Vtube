@@ -24,9 +24,14 @@ const ARM_LEG_JOINTS: Partial<Record<VRMHumanBoneName, { jointFrom: string; join
   rightFoot:     { jointFrom: 'anR',   jointTo: 'toeR' },
 };
 
-const HAND_JOINTS: Partial<Record<VRMHumanBoneName, 'L' | 'R'>> = {
-  leftHand: 'L',
-  rightHand: 'R',
+// jointFrom/jointTo here is a FALLBACK (elbow->wrist FK, same pair that
+// drives the forearm bone) for when hand landmarks aren't available that
+// frame — see the lmPair-falls-back-to-jointFrom/jointTo comment on
+// VtubeRigEntry in GlbBoneDriver.ts. Keeps the hand tracking the arm even
+// when fine hand tracking drops out, instead of freezing in bind pose.
+const HAND_JOINTS: Partial<Record<VRMHumanBoneName, { side: 'L' | 'R'; jointFrom: string; jointTo: string }>> = {
+  leftHand:  { side: 'L', jointFrom: 'elL', jointTo: 'wrL' },
+  rightHand: { side: 'R', jointFrom: 'elR', jointTo: 'wrR' },
 };
 
 // The real skeletal continuation for each driven bone — NOT necessarily its
@@ -51,7 +56,9 @@ const CHAIN_CHILD: Partial<Record<VRMHumanBoneName, VRMHumanBoneName>> = {
 // for the single torso jointFrom/jointTo=hipMid/shMid driven bone.
 const SPINE_PREFERENCE: VRMHumanBoneName[] = ['upperChest', 'chest', 'spine'];
 
-const LOCKED_BONES: VRMHumanBoneName[] = ['hips', 'leftEye', 'rightEye', 'jaw', 'leftToes', 'rightToes'];
+// Eyes are driven separately below (gaze angle from frame.pupil), not left
+// locked like these — see the eulerEntry() calls in buildVrmRig().
+const LOCKED_BONES: VRMHumanBoneName[] = ['hips', 'jaw', 'leftToes', 'rightToes'];
 
 // thumb has Metacarpal/Proximal/Distal (no Intermediate); the rest have
 // Proximal/Intermediate/Distal — matches VRMHumanBoneName's finger segments.
@@ -89,6 +96,20 @@ function lockedEntry(bone: THREE.Bone): VtubeRigEntry {
   };
 }
 
+/** A bone driven directly by a named Euler-rotation channel (head or eye
+ *  gaze) rather than direction-matching — see VtubeRigEntry.eulerChannel. */
+function eulerEntry(bone: THREE.Bone, channel: NonNullable<VtubeRigEntry['eulerChannel']>): VtubeRigEntry {
+  return {
+    bone,
+    role: 'driven',
+    restDir: new THREE.Vector3(0, 1, 0),
+    restQ: bone.quaternion.clone(),
+    bindWorldDir: bindWorldDirOf(bone),
+    length: 0,
+    eulerChannel: channel,
+  };
+}
+
 /** Build a VtubeRig map from a loaded VRM's humanoid bones, keyed by each
  *  bone's raw (original) node name. Requires the scene's matrixWorld to
  *  already be up to date (call group.updateMatrixWorld(true) first, same
@@ -116,13 +137,28 @@ export function buildVrmRig(vrm: VRM): VtubeRig {
     }
   }
 
-  for (const [name, side] of Object.entries(HAND_JOINTS) as Array<[VRMHumanBoneName, 'L' | 'R']>) {
+  for (const [name, hj] of Object.entries(HAND_JOINTS) as Array<[VRMHumanBoneName, { side: 'L' | 'R'; jointFrom: string; jointTo: string }]>) {
     const bone = getBone(name);
     if (bone) {
       const childName = CHAIN_CHILD[name];
-      rig.set(bone.name, drivenEntry(bone, { lmHand: side, lmPair: [0, 9] }, childName ? getBone(childName) : undefined));
+      rig.set(bone.name, drivenEntry(
+        bone,
+        { lmHand: hj.side, lmPair: [0, 9], jointFrom: hj.jointFrom, jointTo: hj.jointTo },
+        childName ? getBone(childName) : undefined,
+      ));
     }
   }
+
+  // Head + eye gaze — driven by Kalidokit Euler channels (frame.head /
+  // frame.pupil), not FK direction-matching, since there's no meaningful
+  // "joint pair" for head orientation or eye look direction the way there is
+  // for a limb. Previously unmapped (head) or explicitly locked (eyes).
+  const headBone = getBone('head');
+  if (headBone) rig.set(headBone.name, eulerEntry(headBone, 'head'));
+  const leftEyeBone = getBone('leftEye');
+  if (leftEyeBone) rig.set(leftEyeBone.name, eulerEntry(leftEyeBone, 'gazeL'));
+  const rightEyeBone = getBone('rightEye');
+  if (rightEyeBone) rig.set(rightEyeBone.name, eulerEntry(rightEyeBone, 'gazeR'));
 
   for (const side of ['left', 'right'] as const) {
     const lmHand: 'L' | 'R' = side === 'left' ? 'L' : 'R';

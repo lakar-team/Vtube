@@ -83,7 +83,8 @@ export interface RuleFlags {
   showEyes: boolean;
   /** Drive the loaded GLB model instead of the procedural skeleton. */
   useCustomModel: boolean;
-  /** Apply ARKit blendshapes to the GLB model's face mesh (disable for helmets/robots). */
+  /** Apply ARKit blendshapes (plain GLBs) or VRM expression presets (VRM
+   *  models) to drive the model's face (disable for helmets/robots). */
   useModelFace: boolean;
   /** Overlay a SkeletonHelper (bone lines) on the loaded GLB model. */
   showModelBones: boolean;
@@ -363,7 +364,13 @@ export function RoomViewport({
         model.skeletonHelper.visible = useModel && rls.showModelBones;
       }
       if (useModel && model) {
-        glbDriver.update(model, figure.position, fk, rig, rls, mx, dataForL, dataForR, frameRefHolder.current.current?.expressions, dt);
+        glbDriver.update(
+          model, figure.position, fk, rig, rls, mx, dataForL, dataForR,
+          frameRefHolder.current.current?.expressions,
+          frameRefHolder.current.current?.head,
+          frameRefHolder.current.current?.pupil,
+          dt,
+        );
       }
 
       if (warningRef.current) {

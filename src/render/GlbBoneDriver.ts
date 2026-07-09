@@ -3,9 +3,16 @@ import type { NormalizedLandmark } from '@mediapipe/tasks-vision';
 import type { VRM } from '@pixiv/three-vrm';
 import type { RigConfig } from '../mocap/rig';
 import type { RuleFlags } from '../components/RoomViewport';
+import type { EulerRotation } from '../mocap/types';
+import { EXPRESSION_KEYS } from '../mocap/types';
 import { lmHandDir } from '../mocap/worldFrame';
 import { resolveChainChild } from './rigMath';
 import { SpringBoneSimulator } from './SpringBones';
+
+/** Max eye-bone rotation (yaw/pitch) at full pupil deflection (±1). Tuned by
+ *  eye, not measured — a VRM's own eye-bone range varies by model, so this is
+ *  a reasonable default rather than a derived constant. */
+const EYE_GAZE_MAX_RAD = THREE.MathUtils.degToRad(20);
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -52,9 +59,22 @@ export interface VtubeRigEntry {
   // driven via FK position pair:
   jointFrom?: string;           // key in FKPositions
   jointTo?:   string;           // key in FKPositions
-  // driven via MediaPipe hand landmarks (mutually exclusive with jointFrom/To):
+  // driven via MediaPipe hand landmarks — falls back to jointFrom/jointTo
+  // (when both are also set) if the landmark data is unavailable that frame,
+  // e.g. hand tracking dropped out but the arm is still tracked. Wrist bones
+  // set both; finger phalanges set only lmHand/lmPair (no FK fallback since
+  // there's no per-finger FK position to fall back to).
   lmHand?:    "L" | "R";
   lmPair?:    [number, number]; // [parentLmIdx, childLmIdx]
+  /**
+   * When set, this bone is driven directly from a named Kalidokit-solved
+   * Euler-rotation channel on the current MocapFrame instead of the
+   * jointFrom/jointTo or lmHand/lmPair direction-matching paths above:
+   * 'head' -> frame.head, 'gazeL'/'gazeR' -> an eye-bone angle derived from
+   * frame.pupil (same signal the procedural skeleton's eyeballs use, just
+   * converted to a rotation instead of a translation).
+   */
+  eulerChannel?: 'head' | 'gazeL' | 'gazeR';
   // spring only:
   stiffness?: number;
   damping?:   number;
@@ -256,6 +276,7 @@ const _parentQ  = new THREE.Quaternion();
 const _tmpPos   = new THREE.Vector3();
 const _tmpScale = new THREE.Vector3();
 const _localDir = new THREE.Vector3();
+const _tEuler   = new THREE.Euler();
 
 // ── Driver ────────────────────────────────────────────────────────────────────
 
@@ -272,6 +293,8 @@ export class GlbBoneDriver {
     dataForL: NormalizedLandmark[] | null,
     dataForR: NormalizedLandmark[] | null,
     expressions: Record<string, number> | undefined,
+    headEuler: EulerRotation | undefined,
+    pupil: { x: number; y: number } | undefined,
     dt: number,
   ): void {
     model.group.position.set(
@@ -284,6 +307,13 @@ export class GlbBoneDriver {
 
     const vtubeRig = model.vtubeRig;
     const fkMap = fk as unknown as Record<string, THREE.Vector3>;
+
+    // Eye-bone gaze angle, shared by both eyes (no independent convergence) —
+    // pupil.x/y is already mirror-adjusted upstream (kalidokitAdapter.ts),
+    // same as headEuler, so no `mx` handling needed here.
+    const gazeEuler: EulerRotation | undefined = pupil
+      ? { x: -pupil.y * EYE_GAZE_MAX_RAD, y: pupil.x * EYE_GAZE_MAX_RAD, z: 0 }
+      : undefined;
 
     // Prime the hierarchy with last frame's quaternions → gives each bone's parent a
     // fresh matrixWorld before the driving pass begins.
@@ -301,36 +331,50 @@ export class GlbBoneDriver {
       if (obj instanceof THREE.Bone) {
         const entry = vtubeRig.get(obj.name);
         if (entry && entry.role === "driven" && boneCount < rules.driveBonesUpTo) {
-          let worldDir: THREE.Vector3 | null = null;
+          if (entry.eulerChannel) {
+            const e = entry.eulerChannel === "head" ? headEuler : gazeEuler;
+            if (e) {
+              obj.quaternion.setFromEuler(_tEuler.set(e.x, e.y, e.z, "XYZ"));
+              boneCount++;
+            }
+          } else {
+            let worldDir: THREE.Vector3 | null = null;
 
-          if (entry.lmPair) {
-            // Hand-landmark driving
-            const lm = entry.lmHand === "L" ? dataForL : dataForR;
-            if (lm && lm.length > Math.max(entry.lmPair[0], entry.lmPair[1])) {
-              worldDir = lmHandDir(lm[entry.lmPair[0]], lm[entry.lmPair[1]], mx);
+            if (entry.lmPair) {
+              // Hand-landmark driving
+              const lm = entry.lmHand === "L" ? dataForL : dataForR;
+              if (lm && lm.length > Math.max(entry.lmPair[0], entry.lmPair[1])) {
+                worldDir = lmHandDir(lm[entry.lmPair[0]], lm[entry.lmPair[1]], mx);
+              }
             }
-          } else if (entry.jointFrom && entry.jointTo) {
-            const a = fkMap[entry.jointFrom];
-            const b = fkMap[entry.jointTo];
-            if (a && b) {
-              _bDir.subVectors(b, a);
-              if (_bDir.lengthSq() > 1e-8) worldDir = _bDir.normalize();
+            // Fall back to FK joint-pair direction (e.g. elbow->wrist) if hand
+            // landmarks weren't available this frame — keeps the wrist tracking
+            // the arm even when fine hand tracking drops out. Only wrist entries
+            // set both lmPair and jointFrom/jointTo; finger phalanges set only
+            // lmPair (no FK position to fall back to) and just freeze instead.
+            if (!worldDir && entry.jointFrom && entry.jointTo) {
+              const a = fkMap[entry.jointFrom];
+              const b = fkMap[entry.jointTo];
+              if (a && b) {
+                _bDir.subVectors(b, a);
+                if (_bDir.lengthSq() > 1e-8) worldDir = _bDir.normalize();
+              }
             }
-          }
 
-          if (worldDir) {
-            // Convert world direction to parent-local space using parent's fresh matrixWorld.
-            if (obj.parent) {
-              obj.parent.matrixWorld.decompose(_tmpPos, _parentQ, _tmpScale);
-              _localDir.copy(worldDir).applyQuaternion(_parentQ.invert());
-            } else {
-              _localDir.copy(worldDir);
+            if (worldDir) {
+              // Convert world direction to parent-local space using parent's fresh matrixWorld.
+              if (obj.parent) {
+                obj.parent.matrixWorld.decompose(_tmpPos, _parentQ, _tmpScale);
+                _localDir.copy(worldDir).applyQuaternion(_parentQ.invert());
+              } else {
+                _localDir.copy(worldDir);
+              }
+              _localDir.normalize();
+              if (_localDir.lengthSq() > 1e-4) {
+                obj.quaternion.setFromUnitVectors(entry.restDir, _localDir);
+              }
+              boneCount++;
             }
-            _localDir.normalize();
-            if (_localDir.lengthSq() > 1e-4) {
-              obj.quaternion.setFromUnitVectors(entry.restDir, _localDir);
-            }
-            boneCount++;
           }
         } else if (entry?.role === "spring") {
           this._spring.step(obj, entry.restQ, entry.stiffness ?? 0.5, entry.damping ?? 0.5, dt);
@@ -353,14 +397,27 @@ export class GlbBoneDriver {
       if (obj instanceof THREE.SkinnedMesh) obj.skeleton.update();
     });
 
+    // VRM expressions — set BEFORE vrm.update(dt) below, since that call
+    // cascades into expressionManager.update() which applies whatever values
+    // were just set. EXPRESSION_KEYS (mocap/types.ts) are exactly VRM 1.0's
+    // expression preset names (blinkLeft/blinkRight/aa/ih/ou/ee/oh), so no
+    // name-remapping is needed the way the ARKit morph-target path below
+    // needs vtubeFaceMap.
+    if (rules.useModelFace && expressions && model.vrm?.expressionManager) {
+      for (const key of EXPRESSION_KEYS) {
+        const v = expressions[key];
+        if (v !== undefined) model.vrm.expressionManager.setValue(key, v);
+      }
+    }
+
     // VRM spring bones (hair/clothing physics) — humanoid.autoUpdateHumanBones
     // is off (see vrmRigAdapter.ts / RoomViewport's VRMLoaderPlugin registration),
     // so this only runs spring bones/constraints, never overriding driven bones.
+    // Also applies the expression values just set above.
     if (model.vrm) model.vrm.update(dt);
 
-    // TODO(vrm face v2): drive VRM expressions (blink/vowel presets) from
-    // `expressions` via vrm.expressionManager instead of the ARKit morph-name
-    // path below, which only makes sense for AI-CAD's raw morph targets.
+    // ARKit raw-morph-target path — only for plain AI-CAD GLBs, which expose
+    // raw morph targets directly rather than a VRM expressionManager.
     if (rules.useModelFace && expressions && !model.vrm) {
       const faceMap = model.vtubeFaceMap;
       model.group.traverse((obj) => {
