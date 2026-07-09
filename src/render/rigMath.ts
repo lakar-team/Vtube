@@ -45,15 +45,36 @@ export function computeRestDirLength(
   preferredChild?: THREE.Bone | null,
 ): { dir: THREE.Vector3; length: number } {
   const childBone = resolveChainChild(bone, preferredChild);
-  if (!childBone) return { dir: new THREE.Vector3(0, 1, 0), length: 0 };
-
-  const boneWPos = bone.getWorldPosition(new THREE.Vector3());
-  const childWPos = childBone.getWorldPosition(new THREE.Vector3());
-  const length = boneWPos.distanceTo(childWPos);
-  if (length < 1e-6) return { dir: new THREE.Vector3(0, 1, 0), length: 0 };
-
-  const worldDir = childWPos.clone().sub(boneWPos).normalize();
-  const worldQ = bone.getWorldQuaternion(new THREE.Quaternion());
-  const localDir = worldDir.applyQuaternion(worldQ.invert());
-  return { dir: localDir, length };
+  if (childBone) {
+    const boneWPos = bone.getWorldPosition(new THREE.Vector3());
+    const childWPos = childBone.getWorldPosition(new THREE.Vector3());
+    const length = boneWPos.distanceTo(childWPos);
+    if (length >= 1e-6) {
+      const worldDir = childWPos.clone().sub(boneWPos).normalize();
+      const worldQ = bone.getWorldQuaternion(new THREE.Quaternion());
+      const localDir = worldDir.applyQuaternion(worldQ.invert());
+      return { dir: localDir, length };
+    }
+  }
+  // Leaf bone (no child at all — e.g. a VRM Distal finger phalanx, always a
+  // leaf per the humanoid spec) — (0,1,0) would be an arbitrary, almost
+  // certainly wrong reference (there's no reason a fingertip's bind-pose
+  // local axis happens to align with world-up). Approximate instead using
+  // the direction from THIS bone's PARENT to this bone — i.e. "assume the
+  // tip continues straight on from the previous segment", true enough at a
+  // typical relaxed-hand bind pose to give a sane reference, unlike a fixed
+  // constant.
+  const parent = bone.parent;
+  if (parent instanceof THREE.Bone) {
+    const parentWPos = parent.getWorldPosition(new THREE.Vector3());
+    const boneWPos = bone.getWorldPosition(new THREE.Vector3());
+    const length = parentWPos.distanceTo(boneWPos);
+    if (length >= 1e-6) {
+      const worldDir = boneWPos.clone().sub(parentWPos).normalize();
+      const worldQ = bone.getWorldQuaternion(new THREE.Quaternion());
+      const localDir = worldDir.applyQuaternion(worldQ.invert());
+      return { dir: localDir, length };
+    }
+  }
+  return { dir: new THREE.Vector3(0, 1, 0), length: 0 };
 }

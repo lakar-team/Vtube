@@ -52,9 +52,10 @@ const CHAIN_CHILD: Partial<Record<VRMHumanBoneName, VRMHumanBoneName>> = {
   leftFoot: 'leftToes',           rightFoot: 'rightToes',
 };
 
-// Prefer the highest bone in the spine chain that exists (upperChest > chest > spine)
-// for the single torso jointFrom/jointTo=hipMid/shMid driven bone.
-const SPINE_PREFERENCE: VRMHumanBoneName[] = ['upperChest', 'chest', 'spine'];
+// Every spine-chain bone (low to high) driven with the torso's
+// jointFrom/jointTo=hipMid/shMid direction — see the driving loop below for
+// why ALL of these are driven, not just one.
+const SPINE_CHAIN: VRMHumanBoneName[] = ['spine', 'chest', 'upperChest'];
 
 // Eyes are driven separately below (gaze angle from frame.pupil), not left
 // locked like these — see the eulerEntry() calls in buildVrmRig().
@@ -124,9 +125,22 @@ export function buildVrmRig(vrm: VRM): VtubeRig {
     return node instanceof THREE.Bone ? node : null;
   };
 
-  for (const name of SPINE_PREFERENCE) {
-    const bone = getBone(name);
-    if (bone) { rig.set(bone.name, drivenEntry(bone, { jointFrom: 'hipMid', jointTo: 'shMid' }, getBone('neck'))); break; }
+  // Drive EVERY spine-chain bone present (spine, chest, upperChest) with the
+  // SAME hipMid->shMid target direction, not just the highest one — picking
+  // only one (the old behaviour) dumps the entire torso-bow rotation onto a
+  // single joint right below the neck, so bowing forward from the hips looks
+  // like a stiff hinge at the neck instead of a natural whole-torso lean.
+  // Matches the procedural mannequin, which represents the torso as 3 stacked
+  // segments all sharing this same direction. Order is low-to-high (spine
+  // first) so each bone's chain-child is correctly the NEXT bone up, not
+  // always 'neck'.
+  const spineChainBones = SPINE_CHAIN
+    .map((name) => getBone(name))
+    .filter((b): b is THREE.Bone => !!b);
+  for (let i = 0; i < spineChainBones.length; i++) {
+    const bone = spineChainBones[i];
+    const nextBone = spineChainBones[i + 1] ?? getBone('neck');
+    rig.set(bone.name, drivenEntry(bone, { jointFrom: 'hipMid', jointTo: 'shMid' }, nextBone));
   }
 
   for (const [name, pair] of Object.entries(ARM_LEG_JOINTS) as Array<[VRMHumanBoneName, { jointFrom: string; jointTo: string }]>) {
@@ -146,15 +160,30 @@ export function buildVrmRig(vrm: VRM): VtubeRig {
         { lmHand: hj.side, lmPair: [0, 9], jointFrom: hj.jointFrom, jointTo: hj.jointTo },
         childName ? getBone(childName) : undefined,
       );
-      // Second reference axis (wrist -> index-finger MCP) so the wrist gets
-      // a full 2-axis orientation instead of single-vector alignment, which
-      // leaves palm-facing/twist unconstrained — see restSideLocal's doc
-      // comment on VtubeRigEntry in GlbBoneDriver.ts.
+      // Second reference axis (index-finger MCP -> little-finger MCP, i.e.
+      // ACROSS the knuckles) so the wrist gets a full 2-axis orientation
+      // instead of single-vector alignment, which leaves palm-facing/twist
+      // unconstrained — see restSideLocal's doc comment on VtubeRigEntry in
+      // GlbBoneDriver.ts. Deliberately NOT wrist->index: that's nearly
+      // collinear with the primary axis (wrist->middle-MCP), so the
+      // Gram-Schmidt-orthogonalized residual is tiny and noise-sensitive —
+      // small tracking jitter got amplified into a large, "swerving" twist.
+      // Across-the-knuckles is close to perpendicular to the primary axis
+      // (same reference ProceduralSkeletonRenderer's palm box already uses
+      // successfully), giving a stable, well-conditioned second axis.
       const indexName = (hj.side === 'L' ? 'leftIndexProximal' : 'rightIndexProximal') as VRMHumanBoneName;
+      const littleName = (hj.side === 'L' ? 'leftLittleProximal' : 'rightLittleProximal') as VRMHumanBoneName;
       const indexBone = getBone(indexName);
-      if (indexBone) {
-        entry.restSideLocal = computeRestDirLength(bone, indexBone).dir;
-        entry.lmSidePair = [0, 5];
+      const littleBone = getBone(littleName);
+      if (indexBone && littleBone) {
+        const idxWPos = indexBone.getWorldPosition(new THREE.Vector3());
+        const ltlWPos = littleBone.getWorldPosition(new THREE.Vector3());
+        const sideWorld = ltlWPos.clone().sub(idxWPos); // little - index, matches lmPair [5,17] (b - a)
+        if (sideWorld.lengthSq() > 1e-9) {
+          const wristWorldQ = bone.getWorldQuaternion(new THREE.Quaternion());
+          entry.restSideLocal = sideWorld.normalize().applyQuaternion(wristWorldQ.invert());
+          entry.lmSidePair = [5, 17];
+        }
       }
       rig.set(bone.name, entry);
     }
