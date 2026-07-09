@@ -95,6 +95,16 @@ export interface LoadedModel {
   group:          THREE.Group;
   bones:          Map<string, THREE.Bone>;  // for logging / inspection
   hipsLocalY:     number;
+  /**
+   * Scaled bounding-box min Y at load time (group.position still (0,0,0), so
+   * this is in "group-local but scaled" space) — how far the model's own
+   * lowest point (feet, in a standing bind pose) sits above its own local
+   * origin. Used by the `groundAnchorModel` rule to plant the model's own
+   * feet on the room floor instead of anchoring it by hip height, for models
+   * whose own proportions don't match the rig's (see hipsLocalY vs.
+   * figurePosition.y mismatch — the whole reason this field exists).
+   */
+  groundOffsetY:  number;
   skeletonHelper: THREE.SkeletonHelper;
   vtubeFaceMode:  string | undefined;
   vtubeFaceMap:   Record<string, string> | undefined;
@@ -297,9 +307,13 @@ export class GlbBoneDriver {
     pupil: { x: number; y: number } | undefined,
     dt: number,
   ): void {
+    // groundAnchorModel: plant the model's own feet on the floor (groundOffsetY
+    // is its own bind-pose lowest point, scaled) instead of matching the rig's
+    // hip height — see the rule's doc comment in RoomViewport.tsx for the
+    // hip-anchor-vs-floor-contact trade-off this exists for.
     model.group.position.set(
       figurePosition.x,
-      figurePosition.y - model.hipsLocalY,
+      rules.groundAnchorModel ? -model.groundOffsetY : figurePosition.y - model.hipsLocalY,
       figurePosition.z,
     );
 

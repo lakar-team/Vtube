@@ -93,6 +93,14 @@ export interface RuleFlags {
    *  positions against where the model's own bones actually land. No-op when
    *  useCustomModel is off — the mannequin is already the only thing shown. */
   showSkeletonOverlay: boolean;
+  /** Anchor the model by its OWN feet touching the room floor instead of by
+   *  matching the rig's hip height. Off (default): hip-anchored, matching the
+   *  mannequin's hip position exactly — correct for showSkeletonOverlay
+   *  comparisons, but a model whose own proportions (leg length vs. torso)
+   *  differ from the rig's will sink into or float above the floor by the
+   *  difference. On: always stands on the floor, but its hips may then sit at
+   *  a visibly different height than the mannequin's when both are shown. */
+  groundAnchorModel: boolean;
   /** DEBUG: freeze the GLB model in its current pose (skip all bone quaternion updates). */
   pauseBoneDriving: boolean;
   /** DEBUG: drive at most this many bones per frame (0 = none). Increment to isolate explosions. */
@@ -111,6 +119,7 @@ export const DEFAULT_RULES: RuleFlags = {
   useModelFace: true,
   showModelBones: false,
   showSkeletonOverlay: false,
+  groundAnchorModel: false,
   pauseBoneDriving: false,
   driveBonesUpTo: 9999,
 };
@@ -490,6 +499,7 @@ export function RoomViewport({
       const targetHeight = rigRef.current.heightCm / 100;
       const scl = modelHeight > 0.01 ? targetHeight / modelHeight : 1;
       group.scale.setScalar(scl);
+      const groundOffsetY = boxRaw.min.y * scl;
       console.log(
         `[GLB] onLoad — raw bbox Y: [${boxRaw.min.y.toFixed(3)}, ${boxRaw.max.y.toFixed(3)}]`,
         `height=${modelHeight.toFixed(3)} units → scale=${scl.toFixed(5)} (target ${targetHeight.toFixed(2)}m)`,
@@ -549,7 +559,7 @@ export function RoomViewport({
         : undefined;
       if (vtubeFaceMode) console.log("[GLB] vtubeFaceMode:", vtubeFaceMode, vtubeFaceMap ? `(${Object.keys(vtubeFaceMap).length} remaps)` : "");
 
-      loadedModelRef.current = { group, bones, hipsLocalY, skeletonHelper, vtubeFaceMode, vtubeFaceMap, vtubeRig, vrm: vrm ?? null };
+      loadedModelRef.current = { group, bones, hipsLocalY, groundOffsetY, skeletonHelper, vtubeFaceMode, vtubeFaceMap, vtubeRig, vrm: vrm ?? null };
       setDiagModel(loadedModelRef.current);
       console.log("[GLB] loadedModelRef set — model ready for rendering");
     }, undefined, (err) => {

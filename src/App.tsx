@@ -212,6 +212,7 @@ export default function App() {
     { key: "useModelFace", label: "model face (ARKit blendshapes)", value: rules.useModelFace, onToggle: (v) => setRule("useModelFace", v) },
     { key: "showModelBones", label: "show model bones (skeleton overlay)", value: rules.showModelBones, onToggle: (v) => setRule("showModelBones", v) },
     { key: "showSkeletonOverlay", label: "show mocap skeleton alongside model", value: rules.showSkeletonOverlay, onToggle: (v) => setRule("showSkeletonOverlay", v) },
+    { key: "groundAnchorModel", label: "ground-anchor model (feet on floor, not hip-matched)", value: rules.groundAnchorModel, onToggle: (v) => setRule("groundAnchorModel", v) },
     { key: "pauseBoneDriving", label: "DEBUG: pause bone driving (freeze pose)", value: rules.pauseBoneDriving, onToggle: (v) => setRule("pauseBoneDriving", v) },
     { key: "posePersistence", label: "pose persistence", value: persistPose, onToggle: (v) => setBoolPersisted("vtube.persistPose", setPersistPose, v) },
     { key: "handPersistence", label: "hand persistence", value: persistHands, onToggle: (v) => setBoolPersisted("vtube.persistHands", setPersistHands, v) },
