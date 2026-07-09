@@ -87,6 +87,11 @@ export interface RuleFlags {
   useModelFace: boolean;
   /** Overlay a SkeletonHelper (bone lines) on the loaded GLB model. */
   showModelBones: boolean;
+  /** Render the procedural mannequin skeleton alongside the loaded GLB model
+   *  (same world-space hip anchor as the model) to compare mocap-driven FK
+   *  positions against where the model's own bones actually land. No-op when
+   *  useCustomModel is off — the mannequin is already the only thing shown. */
+  showSkeletonOverlay: boolean;
   /** DEBUG: freeze the GLB model in its current pose (skip all bone quaternion updates). */
   pauseBoneDriving: boolean;
   /** DEBUG: drive at most this many bones per frame (0 = none). Increment to isolate explosions. */
@@ -104,6 +109,7 @@ export const DEFAULT_RULES: RuleFlags = {
   useCustomModel: false,
   useModelFace: true,
   showModelBones: false,
+  showSkeletonOverlay: false,
   pauseBoneDriving: false,
   driveBonesUpTo: 9999,
 };
@@ -344,8 +350,14 @@ export function RoomViewport({
       //    setting figure.visible = false hides the procedural skeleton cleanly.
       const model = loadedModelRef.current;
       const useModel = rls.useCustomModel && model !== null;
+      const skeletonOverlay = useModel && rls.showSkeletonOverlay;
 
-      figure.visible = !useModel;
+      // figure.position (set above) is the same world-space hip anchor the GLB
+      // model is offset from (see model.group.position below) — showing both
+      // at once compares mocap-driven FK positions against the model's actual
+      // driven-bone positions in the exact same room space.
+      figure.visible = !useModel || skeletonOverlay;
+      skelRenderer.setOverlayMode(skeletonOverlay);
       if (model) {
         model.group.visible = useModel;
         model.skeletonHelper.visible = useModel && rls.showModelBones;

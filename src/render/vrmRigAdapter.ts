@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type { VRM, VRMHumanBoneName } from '@pixiv/three-vrm';
-import { computeRestDirLength } from './rigMath';
+import { computeRestDirLength, resolveChainChild } from './rigMath';
 import { bindWorldDirOf, type VtubeRig, type VtubeRigEntry } from './GlbBoneDriver';
 
 /**
@@ -29,6 +29,24 @@ const HAND_JOINTS: Partial<Record<VRMHumanBoneName, 'L' | 'R'>> = {
   rightHand: 'R',
 };
 
+// The real skeletal continuation for each driven bone — NOT necessarily its
+// first child in the node hierarchy. VRoid/VRM exports commonly attach
+// secondary/spring bones (skirt joints, bust jiggle) as EARLIER children than
+// the actual next joint (e.g. UpperChest's children are often
+// [bustL, bustR, Neck, shoulderL, shoulderR]), so picking "first Bone child"
+// for a bone's rest direction silently references a physics bone instead of
+// the real chain — see computeRestDirLength()/bindWorldDirOf() in rigMath.ts
+// / GlbBoneDriver.ts. Declaring the intended child here sidesteps that.
+const CHAIN_CHILD: Partial<Record<VRMHumanBoneName, VRMHumanBoneName>> = {
+  neck: 'head',
+  leftUpperArm: 'leftLowerArm',   rightUpperArm: 'rightLowerArm',
+  leftLowerArm: 'leftHand',       rightLowerArm: 'rightHand',
+  leftHand: 'leftMiddleProximal', rightHand: 'rightMiddleProximal',
+  leftUpperLeg: 'leftLowerLeg',   rightUpperLeg: 'rightLowerLeg',
+  leftLowerLeg: 'leftFoot',       rightLowerLeg: 'rightFoot',
+  leftFoot: 'leftToes',           rightFoot: 'rightToes',
+};
+
 // Prefer the highest bone in the spine chain that exists (upperChest > chest > spine)
 // for the single torso jointFrom/jointTo=hipMid/shMid driven bone.
 const SPINE_PREFERENCE: VRMHumanBoneName[] = ['upperChest', 'chest', 'spine'];
@@ -45,14 +63,16 @@ const FINGERS: Array<{ prefix: string; segments: string[]; lmPairs: [number, num
   { prefix: 'Little', segments: ['Proximal', 'Intermediate', 'Distal'],     lmPairs: [[17, 18], [18, 19], [19, 20]] },
 ];
 
-function drivenEntry(bone: THREE.Bone, fields: Partial<VtubeRigEntry>): VtubeRigEntry {
-  const { dir, length } = computeRestDirLength(bone);
+function drivenEntry(bone: THREE.Bone, fields: Partial<VtubeRigEntry>, preferredChild?: THREE.Bone | null): VtubeRigEntry {
+  const childBone = resolveChainChild(bone, preferredChild);
+  const { dir, length } = computeRestDirLength(bone, childBone);
   return {
     bone,
     role: 'driven',
     restDir: dir,
     restQ: bone.quaternion.clone(),
-    bindWorldDir: bindWorldDirOf(bone),
+    bindWorldDir: bindWorldDirOf(bone, childBone),
+    childBone,
     length,
     ...fields,
   };
@@ -85,17 +105,23 @@ export function buildVrmRig(vrm: VRM): VtubeRig {
 
   for (const name of SPINE_PREFERENCE) {
     const bone = getBone(name);
-    if (bone) { rig.set(bone.name, drivenEntry(bone, { jointFrom: 'hipMid', jointTo: 'shMid' })); break; }
+    if (bone) { rig.set(bone.name, drivenEntry(bone, { jointFrom: 'hipMid', jointTo: 'shMid' }, getBone('neck'))); break; }
   }
 
   for (const [name, pair] of Object.entries(ARM_LEG_JOINTS) as Array<[VRMHumanBoneName, { jointFrom: string; jointTo: string }]>) {
     const bone = getBone(name);
-    if (bone) rig.set(bone.name, drivenEntry(bone, pair));
+    if (bone) {
+      const childName = CHAIN_CHILD[name];
+      rig.set(bone.name, drivenEntry(bone, pair, childName ? getBone(childName) : undefined));
+    }
   }
 
   for (const [name, side] of Object.entries(HAND_JOINTS) as Array<[VRMHumanBoneName, 'L' | 'R']>) {
     const bone = getBone(name);
-    if (bone) rig.set(bone.name, drivenEntry(bone, { lmHand: side, lmPair: [0, 9] }));
+    if (bone) {
+      const childName = CHAIN_CHILD[name];
+      rig.set(bone.name, drivenEntry(bone, { lmHand: side, lmPair: [0, 9] }, childName ? getBone(childName) : undefined));
+    }
   }
 
   for (const side of ['left', 'right'] as const) {

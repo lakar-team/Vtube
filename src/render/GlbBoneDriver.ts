@@ -4,6 +4,7 @@ import type { VRM } from '@pixiv/three-vrm';
 import type { RigConfig } from '../mocap/rig';
 import type { RuleFlags } from '../components/RoomViewport';
 import { lmHandDir } from '../mocap/worldFrame';
+import { resolveChainChild } from './rigMath';
 import { SpringBoneSimulator } from './SpringBones';
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -38,6 +39,15 @@ export interface VtubeRigEntry {
    * recipe's declared restDir/against live FK — never mutated by driving.
    */
   bindWorldDir: THREE.Vector3;
+  /**
+   * The child bone actually used to compute restDir/bindWorldDir (see
+   * resolveChainChild() in rigMath.ts) — stored so rigDiagnostics.ts's own
+   * restDir re-derivations reuse this same reference instead of re-guessing
+   * via "first Bone child", which can land on a secondary/spring bone.
+   * Undefined for parseVtubeRig()-sourced entries (recipe-declared restDir,
+   * no live child resolution) and for leaf/locked bones.
+   */
+  childBone?: THREE.Bone;
   length:     number;
   // driven via FK position pair:
   jointFrom?: string;           // key in FKPositions
@@ -114,12 +124,15 @@ function inferFingerLmPair(
   return null;
 }
 
-/** World-space unit direction from a bone to its first child bone. Requires
- *  the scene's matrixWorld to already be up to date. Falls back to world-up
- *  for leaf bones (no child bone to point toward). Exported for reuse by
- *  vrmRigAdapter.ts, which builds VtubeRigEntry objects outside parseVtubeRig. */
-export function bindWorldDirOf(bone: THREE.Bone): THREE.Vector3 {
-  const child = bone.children.find((c): c is THREE.Bone => c instanceof THREE.Bone);
+/** World-space unit direction from a bone to its child bone. Requires the
+ *  scene's matrixWorld to already be up to date. Falls back to world-up for
+ *  leaf bones (no child bone to point toward). Exported for reuse by
+ *  vrmRigAdapter.ts, which builds VtubeRigEntry objects outside parseVtubeRig.
+ *  `preferredChild` — see computeRestDirLength() in rigMath.ts for why this
+ *  matters: a plain "first Bone child" pick can land on a secondary/spring
+ *  bone (skirt, bust jiggle) instead of the real skeletal continuation. */
+export function bindWorldDirOf(bone: THREE.Bone, preferredChild?: THREE.Bone | null): THREE.Vector3 {
+  const child = resolveChainChild(bone, preferredChild);
   if (!child) return new THREE.Vector3(0, 1, 0);
   const a = bone.getWorldPosition(new THREE.Vector3());
   const b = child.getWorldPosition(new THREE.Vector3());
@@ -198,19 +211,38 @@ export function parseVtubeRig(group: THREE.Group): VtubeRig | null {
   return rig;
 }
 
-/** Find the world-space Y of the skeleton root bone (parent is not a Bone).
- *  Falls back to searching the entire group if the rig doesn't include the root. */
+/** Number of THREE.Bone ancestors above a bone (0 = its parent isn't a Bone). */
+function boneDepth(bone: THREE.Bone): number {
+  let depth = 0;
+  let p: THREE.Object3D | null = bone.parent;
+  while (p instanceof THREE.Bone) { depth++; p = p.parent; }
+  return depth;
+}
+
+/** Find the world-space Y of the skeleton root bone — the SHALLOWEST bone
+ *  among the rig's entries (fewest THREE.Bone ancestors), not merely one
+ *  with zero Bone ancestors: some rigs (VRM models with a "Root" bone
+ *  wrapping Hips) have a non-tracked Bone above the actual root, which a
+ *  "parent isn't a Bone" check would skip past, mis-picking that wrapper
+ *  (sitting at ground level) instead of Hips. Falls back to searching the
+ *  entire group the same way if the rig doesn't include the root. */
 export function findHipsLocalY(group: THREE.Group, vtubeRig: VtubeRig | null): number {
   let rootBone: THREE.Bone | undefined;
+  let minDepth = Infinity;
 
   if (vtubeRig) {
     for (const entry of vtubeRig.values()) {
-      if (!(entry.bone.parent instanceof THREE.Bone)) { rootBone = entry.bone; break; }
+      const d = boneDepth(entry.bone);
+      if (d < minDepth) { minDepth = d; rootBone = entry.bone; }
     }
   }
   if (!rootBone) {
+    minDepth = Infinity;
     group.traverse((obj) => {
-      if (obj instanceof THREE.Bone && !(obj.parent instanceof THREE.Bone)) rootBone = obj;
+      if (obj instanceof THREE.Bone) {
+        const d = boneDepth(obj);
+        if (d < minDepth) { minDepth = d; rootBone = obj; }
+      }
     });
   }
 

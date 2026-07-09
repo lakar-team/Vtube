@@ -122,14 +122,39 @@ export default function App() {
       return next;
     });
   };
+  // Derived 3-way view over useCustomModel/showSkeletonOverlay (see
+  // room-view-3d-redesign in the wiki) — same two rule flags the Rules
+  // Inspector's individual checkboxes drive, just collapsed into one control
+  // for the common case: skeleton only, model only, or both at once for
+  // comparing mocap-driven FK against the model's actual driven pose.
+  type AvatarView = "skeleton" | "model" | "both";
+  const avatarView: AvatarView =
+    !rules.useCustomModel ? "skeleton" : rules.showSkeletonOverlay ? "both" : "model";
+  const setAvatarView = (v: AvatarView) => {
+    if (v === "skeleton") {
+      setRule("useCustomModel", false);
+    } else {
+      setRule("useCustomModel", true);
+      setRule("showSkeletonOverlay", v === "both");
+    }
+  };
+
   const [countdown, setCountdown] = useState<number | null>(null);
   const captureTimerRef = useRef<number | null>(null);
 
-  const [modelUrl, setModelUrl] = useState<string | null>(null);
+  // Preloaded so there's always something to compare the mocap skeleton
+  // against without a manual "load model" step — "replace model" swaps in a
+  // user-picked file the same way it always has. Served from public/models/
+  // (see vault/vtube/vrm-support.md), so it works out of the box, no AI-CAD prep.
+  const DEFAULT_MODEL_URL = "/models/avatar.vrm";
+  const DEFAULT_MODEL_NAME = "avatar.vrm";
+
+  const [modelUrl, setModelUrl] = useState<string | null>(DEFAULT_MODEL_URL);
   // Original picked filename — lets the Setup Wizard tell a VRM (no AI-CAD
   // prep needed) apart from a plain GLB (modelUrl itself is an opaque blob: URL).
-  const [modelFileName, setModelFileName] = useState<string | null>(null);
+  const [modelFileName, setModelFileName] = useState<string | null>(DEFAULT_MODEL_NAME);
   // Revoke the object URL when it changes or on unmount to avoid memory leaks.
+  // A no-op for the preloaded DEFAULT_MODEL_URL (not a blob: URL).
   useEffect(() => {
     return () => { if (modelUrl) URL.revokeObjectURL(modelUrl); };
   }, [modelUrl]);
@@ -186,6 +211,7 @@ export default function App() {
     { key: "useCustomModel", label: "use custom 3D model", value: rules.useCustomModel, onToggle: (v) => setRule("useCustomModel", v) },
     { key: "useModelFace", label: "model face (ARKit blendshapes)", value: rules.useModelFace, onToggle: (v) => setRule("useModelFace", v) },
     { key: "showModelBones", label: "show model bones (skeleton overlay)", value: rules.showModelBones, onToggle: (v) => setRule("showModelBones", v) },
+    { key: "showSkeletonOverlay", label: "show mocap skeleton alongside model", value: rules.showSkeletonOverlay, onToggle: (v) => setRule("showSkeletonOverlay", v) },
     { key: "pauseBoneDriving", label: "DEBUG: pause bone driving (freeze pose)", value: rules.pauseBoneDriving, onToggle: (v) => setRule("pauseBoneDriving", v) },
     { key: "posePersistence", label: "pose persistence", value: persistPose, onToggle: (v) => setBoolPersisted("vtube.persistPose", setPersistPose, v) },
     { key: "handPersistence", label: "hand persistence", value: persistHands, onToggle: (v) => setBoolPersisted("vtube.persistHands", setPersistHands, v) },
@@ -393,6 +419,26 @@ export default function App() {
               <option value="facemesh">face mesh</option>
             </select>
           </label>
+          <label
+            className="toggle"
+            title={
+              "Which avatar(s) to render in the 3D room:\n" +
+              "• skeleton — the mocap-driven mannequin only\n" +
+              "• 3D model — the loaded GLB/VRM only\n" +
+              "• both — mannequin + model together, same world-space hip anchor, " +
+              "for comparing the model's actual driven pose against the mocap FK"
+            }
+          >
+            avatar
+            <select
+              value={avatarView}
+              onChange={(e) => setAvatarView(e.target.value as AvatarView)}
+            >
+              <option value="skeleton">skeleton</option>
+              <option value="model">3D model</option>
+              <option value="both">both (simultaneous)</option>
+            </select>
+          </label>
           <button
             type="button"
             className="capture-btn"
@@ -407,7 +453,7 @@ export default function App() {
             className="capture-btn"
             data-wizard="load-model-btn"
             onClick={() => glbInputRef.current?.click()}
-            title="Load a GLB/GLTF character model with a Mixamo-compatible skeleton (prepared in AI-CAD), or a VRM model (works out of the box). Toggle it on in the Rules Inspector."
+            title="Replace the preloaded sample VRM with your own GLB/GLTF character model (with a Mixamo-compatible skeleton, prepared in AI-CAD) or VRM (works out of the box). Use the “avatar” selector to switch between skeleton/model/both views."
           >
             {modelUrl ? "replace model" : "load model"}
           </button>

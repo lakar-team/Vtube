@@ -100,6 +100,7 @@ export class ProceduralSkeletonRenderer {
   private _skin = new THREE.Color();
   private _blue = new THREE.Color(0x4477cc);
   private _red  = new THREE.Color(0xcc3344);
+  private _overlayActive = false;
 
   constructor(figure: THREE.Group) {
     this._matL = new THREE.MeshLambertMaterial({ color: 0x4477cc });
@@ -156,6 +157,20 @@ export class ProceduralSkeletonRenderer {
     this._matC.color.copy(this._skin);
     this._matL.color.copy(this._skin).lerp(this._blue, 0.25);
     this._matR.color.copy(this._skin).lerp(this._red,  0.25);
+  }
+
+  /** Ghost the mannequin (translucent, no depth-write) when it's shown
+   *  alongside the loaded GLB model, so the model surface doesn't fully
+   *  hide it — divergence between the two shows as the mannequin poking
+   *  through the model mesh. Full-opaque when shown on its own. */
+  setOverlayMode(active: boolean): void {
+    if (active === this._overlayActive) return;
+    this._overlayActive = active;
+    for (const m of [this._matL, this._matR, this._matC]) {
+      m.transparent = active;
+      m.opacity = active ? 0.55 : 1;
+      m.depthWrite = !active;
+    }
   }
 
   update(

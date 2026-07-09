@@ -98,7 +98,7 @@ export function staticChecks(model: LoadedModel): DiagIssue[] {
     // Stale restDir: recompute the bone's actual local dir-to-child from the
     // live hierarchy and compare against what the recipe declared.
     if (entry.length > 0) {
-      const { dir: liveDir } = computeRestDirLength(entry.bone);
+      const { dir: liveDir } = computeRestDirLength(entry.bone, entry.childBone);
       if (liveDir.lengthSq() > 1e-8) {
         const err = angleDeg(liveDir, entry.restDir);
         if (err > STALE_RESTDIR_DEG) {
@@ -259,7 +259,7 @@ export function captureCalibration(model: LoadedModel, fkSamples: FKPositions[])
 // ── Apply fixes to the in-memory rig ─────────────────────────────────────────
 
 function refreshRestDir(entry: VtubeRigEntry): void {
-  const { dir } = computeRestDirLength(entry.bone);
+  const { dir } = computeRestDirLength(entry.bone, entry.childBone);
   if (dir.lengthSq() > 1e-8) entry.restDir = dir;
 }
 
