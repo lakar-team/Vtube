@@ -308,6 +308,35 @@ const _obX = new THREE.Vector3();
 const _obY = new THREE.Vector3();
 const _obZ = new THREE.Vector3();
 const _obM = new THREE.Matrix4();
+const _clampAxis = new THREE.Vector3();
+const _clampQ    = new THREE.Quaternion();
+
+// No real finger joint bends anywhere near this far in one segment (DIP/PIP
+// max out around 90-110anatomically). Bounding it keeps setFromUnitVectors
+// away from its own well-known instability near the antipodal (180°) case,
+// where the rotation axis becomes ill-defined and tiny per-frame tracking
+// noise in the target direction produces wild, unstable swings in the
+// output — confirmed against a real recording: restDir-vs-target angle sat
+// at 130-166° for ~1.4s straight while the finger was held curled, and the
+// driven bone's rotation swung through 150-250° during that exact window
+// even though the underlying landmark positions were smooth and stable.
+const MAX_FINGER_BEND_RAD = 110 * Math.PI / 180;
+
+/** Clamps `dir` to at most `maxAngle` radians away from `ref` (both assumed
+ *  normalized) by rotating it toward `ref` along their shared perpendicular
+ *  axis. No-op if already within range. Falls back to leaving `dir`
+ *  unchanged if `ref`/`dir` are (near-)exactly opposite — no stable axis to
+ *  clamp along in that case, but keeping inputs from reaching that extreme
+ *  in the first place is exactly what this clamp is for. */
+function clampAngleFromRef(dir: THREE.Vector3, ref: THREE.Vector3, maxAngle: number): THREE.Vector3 {
+  const angle = ref.angleTo(dir);
+  if (angle <= maxAngle || angle < 1e-6) return dir;
+  _clampAxis.crossVectors(ref, dir);
+  if (_clampAxis.lengthSq() < 1e-10) return dir;
+  _clampAxis.normalize();
+  _clampQ.setFromAxisAngle(_clampAxis, maxAngle);
+  return dir.copy(ref).applyQuaternion(_clampQ);
+}
 
 /**
  * Builds an absolute orientation quaternion from a primary axis (already
@@ -430,6 +459,15 @@ export class GlbBoneDriver {
                 _localDir.copy(worldDir);
               }
               _localDir.normalize();
+              // Finger phalanges (lmPair set, no jointFrom fallback, no
+              // restSideLocal — i.e. not the wrist) — clamp to a plausible
+              // bend angle. See MAX_FINGER_BEND_RAD's comment: fingers curl
+              // through a wide enough range that the live target direction
+              // can end up near-antipodal to restDir, which is exactly where
+              // single-vector alignment becomes numerically unstable.
+              if (entry.lmPair && !entry.jointFrom && !entry.restSideLocal) {
+                clampAngleFromRef(_localDir, entry.restDir, MAX_FINGER_BEND_RAD);
+              }
               if (_localDir.lengthSq() > 1e-4) {
                 // Wrist bones (restSideLocal/lmSidePair set): full 2-axis
                 // orientation — see restSideLocal's doc comment. Everything
