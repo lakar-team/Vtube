@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type { VRM, VRMHumanBoneName } from '@pixiv/three-vrm';
 import { computeRestDirLength, resolveChainChild } from './rigMath';
-import { bindWorldDirOf, type VtubeRig, type VtubeRigEntry } from './GlbBoneDriver';
+import { bindWorldDirOf, basisQuaternion, type VtubeRig, type VtubeRigEntry } from './GlbBoneDriver';
 
 /**
  * Builds a VtubeRig straight from a VRM's humanoid bone map instead of the
@@ -186,6 +186,29 @@ export function buildVrmRig(vrm: VRM): VtubeRig {
         }
       }
       rig.set(bone.name, entry);
+    }
+  }
+
+  // Forearm twist-sharing: the forearm absorbs a fraction of the palm-facing
+  // twist so the wrist doesn't carry it all on one joint (up to ~180° of
+  // axial twist over a single joint candy-wraps the mesh into a pinch —
+  // confirmed against a real recording). See twistShareFraction's doc comment
+  // in GlbBoneDriver.ts for the exact mechanism. 0.5 splits a palm flip
+  // roughly evenly between the forearm and wrist joints, the usual manual-
+  // rigging compromise when a model has no dedicated twist bones (VRoid
+  // exports don't).
+  const FOREARM_TWIST_SHARE = 0.5;
+  for (const side of ['left', 'right'] as const) {
+    const forearmBone = getBone(`${side}LowerArm` as VRMHumanBoneName);
+    const handBone = getBone(`${side}Hand` as VRMHumanBoneName);
+    const forearmEntry = forearmBone ? rig.get(forearmBone.name) : undefined;
+    const handEntry = handBone ? rig.get(handBone.name) : undefined;
+    if (forearmEntry && handEntry?.restSideLocal) {
+      const handRestBasis = new THREE.Quaternion();
+      basisQuaternion(handEntry.restDir, handEntry.restSideLocal, handRestBasis);
+      forearmEntry.twistShareFraction = FOREARM_TWIST_SHARE;
+      forearmEntry.twistChildRestBasisInv = handRestBasis.invert();
+      forearmEntry.lmHand = side === 'left' ? 'L' : 'R';
     }
   }
 

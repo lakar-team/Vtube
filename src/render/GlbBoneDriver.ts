@@ -81,6 +81,29 @@ export interface VtubeRigEntry {
   restSideLocal?: THREE.Vector3;
   lmSidePair?:    [number, number];
   /**
+   * Forearm bones only: absorb this fraction (0-1) of the palm-facing twist
+   * that the wrist would otherwise have to carry entirely by itself. A
+   * single elbow->wrist position vector can't express rotation around the
+   * forearm's own length axis, so without this 100% of a palm flip lands on
+   * the one wrist joint — up to ~180° of axial twist over a single joint,
+   * which candy-wraps the mesh into a pinch. The driver computes the twist
+   * EXACTLY (swing-twist decomposition of the wrist's would-be local
+   * rotation, see the twist-share block in update()), rotates the forearm by
+   * this fraction of it, and the wrist's own 2-axis targeting — computed
+   * against the freshly twisted parent frame in the same parent-before-child
+   * pass — automatically covers only the remainder. Mirrors how a real arm
+   * splits rotation between forearm pronation and the wrist joint.
+   * Requires twistChildRestBasisInv.
+   */
+  twistShareFraction?: number;
+  /**
+   * Inverse of the child WRIST entry's bind-pose basis quaternion
+   * (basisQuaternion(hand restDir, hand restSideLocal), inverted) —
+   * precomputed at rig build so the forearm's twist-share block can compute
+   * the wrist's would-be local rotation without a rig lookup per frame.
+   */
+  twistChildRestBasisInv?: THREE.Quaternion;
+  /**
    * When set, this bone is driven directly from a named Kalidokit-solved
    * Euler-rotation channel on the current MocapFrame instead of the
    * jointFrom/jointTo or lmHand/lmPair direction-matching paths above:
@@ -304,6 +327,22 @@ const _tEuler   = new THREE.Euler();
 const _localSide   = new THREE.Vector3();
 const _qRestBasis  = new THREE.Quaternion();
 const _qLiveBasis  = new THREE.Quaternion();
+const _qSwing      = new THREE.Quaternion();
+const _qTwist      = new THREE.Quaternion();
+const _qHandWorld  = new THREE.Quaternion();
+const _qH0         = new THREE.Quaternion();
+const _qTarget     = new THREE.Quaternion();
+
+/**
+ * Rate caps for the wrist/forearm anti-pop measures (see the rate-limit and
+ * twist-share blocks in update()). 720°/s comfortably covers real wrist
+ * motion — a fast deliberate flick is ~90° in 0.1s (900°/s) at the extreme,
+ * and observed real recordings average ~165°/s — while a MediaPipe
+ * tracking flip (a 45-176° single-frame pop) gets spread over a few frames
+ * instead of snapping.
+ */
+const WRIST_MAX_RAD_PER_S = THREE.MathUtils.degToRad(720);
+const TWIST_MAX_RAD_PER_S = THREE.MathUtils.degToRad(720);
 const _obX = new THREE.Vector3();
 const _obY = new THREE.Vector3();
 const _obZ = new THREE.Vector3();
@@ -347,7 +386,7 @@ function clampAngleFromRef(dir: THREE.Vector3, ref: THREE.Vector3, maxAngle: num
  * VtubeRigEntry.restSideLocal's doc comment for why the wrist specifically
  * needs this (twist/roll is unconstrained by a single direction vector).
  */
-function basisQuaternion(primary: THREE.Vector3, sideRough: THREE.Vector3, out: THREE.Quaternion): void {
+export function basisQuaternion(primary: THREE.Vector3, sideRough: THREE.Vector3, out: THREE.Quaternion): void {
   _obX.copy(primary);
   _obY.copy(sideRough).addScaledVector(primary, -sideRough.dot(primary));
   if (_obY.lengthSq() < 1e-8) {
@@ -367,6 +406,10 @@ function basisQuaternion(primary: THREE.Vector3, sideRough: THREE.Vector3, out: 
 
 export class GlbBoneDriver {
   private _spring = new SpringBoneSimulator();
+  /** Per-forearm twist-share state: unwrapped target twist + rate-limited applied twist (radians). */
+  private _twistState = new WeakMap<THREE.Bone, { target: number; applied: number }>();
+  /** Last applied local quaternion per wrist bone, for the anti-pop rate limiter. */
+  private _wristPrevQ = new WeakMap<THREE.Bone, THREE.Quaternion>();
 
   update(
     model: LoadedModel,
@@ -480,7 +523,18 @@ export class GlbBoneDriver {
                   if (lm && lm.length > Math.max(sa, sb)) {
                     const sideWorldDir = lmHandDir(lm[sa], lm[sb], mx);
                     if (obj.parent) {
-                      _localSide.copy(sideWorldDir).applyQuaternion(_parentQ.invert());
+                      // _parentQ was ALREADY inverted (in place) when _localDir
+                      // was converted above — apply as-is. Calling .invert()
+                      // again here was a bug that un-inverted it, converting
+                      // the side vector by the parent's world rotation instead
+                      // of its inverse: the palm-facing twist was computed in a
+                      // garbage frame (wrong by ~2x the parent's world
+                      // rotation) — fine with the arm at rest, wildly wrong as
+                      // soon as the arm moved. The primary axis was unaffected
+                      // (it used the correctly-inverted value), which is why
+                      // direction audits showed perfect alignment while the
+                      // wrist visibly twisted into a pinch.
+                      _localSide.copy(sideWorldDir).applyQuaternion(_parentQ);
                     } else {
                       _localSide.copy(sideWorldDir);
                     }
@@ -489,9 +543,82 @@ export class GlbBoneDriver {
                     obj.quaternion.copy(_qLiveBasis).multiply(_qRestBasis.invert());
                     usedTwoAxis = true;
                   }
+                } else if (entry.twistShareFraction !== undefined && entry.twistChildRestBasisInv) {
+                  // Forearm twist-sharing — see twistShareFraction's doc
+                  // comment. Swing (elbow->wrist direction) is exactly the
+                  // single-axis rotation as before; on top of it, rotate
+                  // around the forearm's own length axis by a FRACTION of the
+                  // twist the wrist would otherwise have to absorb alone.
+                  //
+                  // The twist is computed exactly: q_h0 below is the local
+                  // rotation the WRIST would need if the forearm applied no
+                  // twist (swing-only forearm world = Wparent * qSwing; wrist
+                  // target world basis from live landmarks; hand rest basis
+                  // precomputed). Its twist component about the forearm axis
+                  // (swing-twist decomposition) is the exact angle that, if
+                  // the forearm absorbs it, leaves the wrist with only
+                  // bend/flexion. Algebra: forearm = qSwing * Rot(restDir, t)
+                  // changes the wrist's required local rotation to
+                  // Rot(restDir, -t) * q_h0, so t = fraction * twist(q_h0)
+                  // shrinks the wrist's twist by exactly that fraction.
+                  _qSwing.setFromUnitVectors(entry.restDir, _localDir);
+                  let st = this._twistState.get(obj);
+                  if (!st) { st = { target: 0, applied: 0 }; this._twistState.set(obj, st); }
+                  const lm = entry.lmHand === "L" ? dataForL : dataForR;
+                  if (lm && lm.length > 17) {
+                    basisQuaternion(lmHandDir(lm[0], lm[9], mx), lmHandDir(lm[5], lm[17], mx), _qHandWorld);
+                    _qH0.copy(_qSwing).invert();
+                    if (obj.parent) _qH0.multiply(_parentQ); // _parentQ = Wparent⁻¹ (inverted above)
+                    _qH0.multiply(_qHandWorld).multiply(entry.twistChildRestBasisInv);
+                    // Twist of q_h0 about the forearm axis: project the
+                    // quaternion's vector part onto the axis (standard
+                    // swing-twist decomposition).
+                    const a = entry.restDir;
+                    const proj = _qH0.x * a.x + _qH0.y * a.y + _qH0.z * a.z;
+                    let theta = 2 * Math.atan2(proj, _qH0.w);
+                    if (theta > Math.PI) theta -= 2 * Math.PI;
+                    else if (theta < -Math.PI) theta += 2 * Math.PI;
+                    // Unwrap against the previous target so a near-±180°
+                    // twist doesn't flip sign frame-to-frame (a partial
+                    // fraction of +179° vs -179° are very different
+                    // rotations even though the full angles nearly agree).
+                    while (theta - st.target > Math.PI) theta -= 2 * Math.PI;
+                    while (theta - st.target < -Math.PI) theta += 2 * Math.PI;
+                    st.target = THREE.MathUtils.clamp(theta, -1.5 * Math.PI, 1.5 * Math.PI);
+                  }
+                  // When landmarks drop out, target holds its last value —
+                  // matches the wrist freezing rather than snapping untwisted.
+                  const desired = st.target * entry.twistShareFraction;
+                  const maxStep = TWIST_MAX_RAD_PER_S * dt;
+                  st.applied += THREE.MathUtils.clamp(desired - st.applied, -maxStep, maxStep);
+                  _qTwist.setFromAxisAngle(entry.restDir, st.applied);
+                  obj.quaternion.copy(_qSwing).multiply(_qTwist);
+                  usedTwoAxis = true;
                 }
                 if (!usedTwoAxis) {
                   obj.quaternion.setFromUnitVectors(entry.restDir, _localDir);
+                }
+                // Rate-limit the wrist's local rotation: MediaPipe's hand
+                // tracker occasionally flips the whole hand orientation for a
+                // frame (mislabelled palm/back, or a dropout-reacquire pop) —
+                // observed in real recordings as 45-176° single-frame jumps
+                // on ~1-2% of frames. Real wrist motion stays well under the
+                // rate cap; a genuine instant flip catches up over a few
+                // frames instead of popping.
+                if (entry.restSideLocal && entry.lmSidePair) {
+                  let prev = this._wristPrevQ.get(obj);
+                  if (prev) {
+                    const ang = prev.angleTo(obj.quaternion);
+                    const maxStep = WRIST_MAX_RAD_PER_S * dt;
+                    if (ang > maxStep && ang > 1e-6) {
+                      _qTarget.copy(obj.quaternion);
+                      obj.quaternion.copy(prev).slerp(_qTarget, maxStep / ang);
+                    }
+                  } else {
+                    prev = new THREE.Quaternion();
+                    this._wristPrevQ.set(obj, prev);
+                  }
+                  prev.copy(obj.quaternion);
                 }
               }
               boneCount++;
